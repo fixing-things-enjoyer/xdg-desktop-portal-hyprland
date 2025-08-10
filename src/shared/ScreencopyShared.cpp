@@ -87,9 +87,11 @@ SSelectionData promptForScreencopySelection() {
     const auto SEL   = SELECTION.substr(SELECTION.find_first_of('/') + 1);
 
     for (auto& flag : FLAGS) {
-        if (flag == 'r')
+        if (flag == 'r') {
             data.allowToken = true;
-        else
+        } else if (flag == 't') {
+            data.needsTransform = true;
+        } else
             Debug::log(LOG, "[screencopy] unknown flag from share-picker: {}", flag);
     }
 
@@ -108,6 +110,9 @@ SSelectionData promptForScreencopySelection() {
             data.windowHandle = HANDLE->handle;
             data.windowClass  = HANDLE->windowClass;
         }
+
+        if (data.needsTransform)
+            Debug::log(WARN, "[screencopy] transform forced on a window. This is not supported and will be ignored.");
     } else if (SEL.find("region:") == 0) {
         std::string running = SEL;
         running             = running.substr(7);

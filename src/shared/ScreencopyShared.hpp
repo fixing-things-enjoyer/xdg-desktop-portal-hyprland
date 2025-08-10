@@ -35,7 +35,8 @@ struct SSelectionData {
     std::string                       output;
     SP<CCZwlrForeignToplevelHandleV1> windowHandle = nullptr;
     uint32_t                          x = 0, y = 0, w = 0, h = 0; // for TYPE_GEOMETRY
-    bool                              allowToken = false;
+    bool                              allowToken    = false;
+    bool                              needsTransform = false;
 
     // for restoring
     std::string windowClass;

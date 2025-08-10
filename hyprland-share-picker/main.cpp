@@ -129,9 +129,12 @@ int main(int argc, char* argv[]) {
         button->setMinimumSize(0, BUTTON_HEIGHT);
         SCREENS_SCROLL_AREA_CONTENTS_LAYOUT->addWidget(button);
 
+        const auto FORCETRANSFORM = w.findChild<QCheckBox*>("forceTransform");
+
         QObject::connect(button, &QPushButton::clicked, [=]() {
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (FORCETRANSFORM->isChecked() ? "t" : "");
             std::cout << "/";
 
             std::cout << "screen:" << outputName.toStdString() << "\n";
@@ -165,9 +168,12 @@ int main(int argc, char* argv[]) {
 
         mainPickerPtr->windowIDs[button] = window.id;
 
+        const auto FORCETRANSFORM = w.findChild<QCheckBox*>("forceTransform");
+
         QObject::connect(button, &QPushButton::clicked, [=]() {
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (FORCETRANSFORM->isChecked() ? "t" : "");
             std::cout << "/";
 
             std::cout << "window:" << mainPickerPtr->windowIDs[button] << "\n";
@@ -195,6 +201,8 @@ int main(int argc, char* argv[]) {
     ElidedButton* button = new ElidedButton(text);
     button->setMaximumSize(400, BUTTON_HEIGHT);
     REGION_LAYOUT->addWidget(button);
+
+    const auto FORCETRANSFORM = w.findChild<QCheckBox*>("forceTransform");
 
     QObject::connect(button, &QPushButton::clicked, [=]() {
         mainPickerPtr->hide();
@@ -241,6 +249,7 @@ int main(int argc, char* argv[]) {
 
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (FORCETRANSFORM->isChecked() ? "t" : "");
             std::cout << "/";
 
             std::cout << "region:" << SCREEN_NAME << "@" << X - pScreen->geometry().x() << "," << Y - pScreen->geometry().y() << "," << W << "," << H << "\n";

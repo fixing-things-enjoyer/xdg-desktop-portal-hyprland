@@ -322,10 +322,12 @@ void CScreencopyPortal::SSession::startCopy() {
         sharingData.frameCallback = makeShared<CCZwlrScreencopyFrameV1>(g_pPortalManager->m_sPortals.screencopy->m_sState.screencopy->sendCaptureOutputRegion(
             cursorMode, POUTPUT->output->resource(), selection.x, selection.y, selection.w, selection.h));
         sharingData.transform     = POUTPUT->transform;
+        Debug::log(LOG, "[screencopy] Session for output region {} using transform {}", POUTPUT->name, (int)POUTPUT->transform);
     } else if (selection.type == TYPE_OUTPUT) {
         sharingData.frameCallback =
             makeShared<CCZwlrScreencopyFrameV1>(g_pPortalManager->m_sPortals.screencopy->m_sState.screencopy->sendCaptureOutput(cursorMode, POUTPUT->output->resource()));
         sharingData.transform = POUTPUT->transform;
+        Debug::log(LOG, "[screencopy] Session for output {} using transform {}", POUTPUT->name, (int)POUTPUT->transform);
     } else if (selection.type == TYPE_WINDOW) {
         if (!selection.windowHandle) {
             Debug::log(ERR, "[screencopy] selected invalid window?");
@@ -334,6 +336,7 @@ void CScreencopyPortal::SSession::startCopy() {
         sharingData.windowFrameCallback = makeShared<CCHyprlandToplevelExportFrameV1>(
             g_pPortalManager->m_sPortals.screencopy->m_sState.toplevel->sendCaptureToplevelWithWlrToplevelHandle(cursorMode, selection.windowHandle->resource()));
         sharingData.transform = WL_OUTPUT_TRANSFORM_NORMAL;
+        Debug::log(LOG, "[screencopy] Session for window using transform {}", (int)WL_OUTPUT_TRANSFORM_NORMAL);
     } else {
         Debug::log(ERR, "[screencopy] Unsupported selection {}", (int)selection.type);
         return;
@@ -1087,7 +1090,7 @@ void CPipewireConnection::enqueue(CScreencopyPortal::SSession* pSession) {
     spa_meta_videotransform* vt = (spa_meta_videotransform*)spa_buffer_find_meta_data(spaBuf, SPA_META_VideoTransform, sizeof(*vt));
     if (vt) {
         vt->transform = pSession->sharingData.transform;
-        Debug::log(TRACE, "[pw]  | meta transform {}", vt->transform);
+        Debug::log(LOG, "[pw] PipeWire buffer metadata: setting transform to {}", vt->transform);
     }
 
     spa_meta* damage = spa_buffer_find_meta(spaBuf, SPA_META_VideoDamage);

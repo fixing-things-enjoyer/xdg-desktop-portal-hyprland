@@ -270,6 +270,16 @@ Only select if you trust the application.</string>
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QCheckBox" name="forceTransform">
+        <property name="toolTip">
+         <string>Enable for applications that ignore monitor rotation. (e.g. Discord)</string>
+        </property>
+        <property name="text">
+         <string>Force software transform (compatibility)</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </item>
    </layout>
