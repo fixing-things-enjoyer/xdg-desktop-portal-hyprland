@@ -197,15 +197,22 @@ int main(int argc, char* argv[]) {
     REGION_LAYOUT->addWidget(button);
 
     QObject::connect(button, &QPushButton::clicked, [=]() {
+        mainPickerPtr->hide();
         auto REGION = execAndGet("slurp -f \"%o %x %y %w %h\"");
-        REGION      = REGION.substr(0, REGION.length());
+
+        if (REGION.empty() || REGION == "error") {
+            mainPickerPtr->show();
+            return;
+        }
+
+        if (REGION.back() == '\n')
+            REGION.pop_back();
 
         // now, get the screen
         QScreen* pScreen = nullptr;
         if (REGION.find_first_of(' ') == std::string::npos) {
-            std::cout << "error1\n";
-            pickerPtr->quit();
-            return 1;
+            mainPickerPtr->show();
+            return;
         }
         const auto SCREEN_NAME = REGION.substr(0, REGION.find_first_of(' '));
 
@@ -217,9 +224,8 @@ int main(int argc, char* argv[]) {
         }
 
         if (!pScreen) {
-            std::cout << "error2\n";
-            pickerPtr->quit();
-            return 1;
+            mainPickerPtr->show();
+            return;
         }
 
         // get all the coords
@@ -244,16 +250,11 @@ int main(int argc, char* argv[]) {
             settings->sync();
 
             pickerPtr->quit();
-            return 0;
+            return;
         } catch (...) {
-            std::cout << "error3\n";
-            pickerPtr->quit();
-            return 1;
+            mainPickerPtr->show();
+            return;
         }
-
-        std::cout << "error4\n";
-        pickerPtr->quit();
-        return 1;
     });
 
     w.show();
