@@ -25,6 +25,10 @@ class CScreencopyPortal {
     void                                 queueNextShareFrame(SSession* pSession);
     bool                                 hasToplevelCapabilities();
 
+    static sdbus::Struct<std::string, uint32_t, sdbus::Variant> getFullRestoreStruct(const SSelectionData& data, uint32_t cursor);
+
+    void emitResponseSignal(sdbus::ObjectPath requestHandle, uint32_t responseCode, std::unordered_map<std::string, sdbus::Variant> options);
+
     std::unique_ptr<CPipewireConnection> m_pPipewire;
 
     // Changed from private to public to allow SSession to access it
@@ -33,9 +37,10 @@ class CScreencopyPortal {
         SP<CCHyprlandToplevelExportManagerV1> toplevel   = nullptr;
     } m_sState;
 
-  private:
+    public:
     std::unique_ptr<sdbus::IObject>        m_pObject;
 
+  private:
     std::vector<std::unique_ptr<SSession>> m_vSessions;
 
     SSession*                              getSession(sdbus::ObjectPath& path);

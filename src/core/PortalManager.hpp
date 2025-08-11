@@ -66,7 +66,11 @@ struct SDMABUFModifier {
     uint64_t mod;
 };
 
+class CRenderer;
+
 class CPortalManager {
+  public:
+    std::unique_ptr<CRenderer> m_pRenderer;
   public:
     CPortalManager();
     ~CPortalManager(); // Declared destructor

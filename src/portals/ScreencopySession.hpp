@@ -1,6 +1,8 @@
 #pragma once
 
 #include <sdbus-c++/sdbus-c++.h>
+#include <mutex>
+#include <condition_variable>
 #include "../shared/ScreencopyShared.hpp"
 #include "../dbusDefines.hpp"
 #include <chrono>
@@ -41,10 +43,18 @@ struct SSession {
     std::unique_ptr<SDBusSession> session;
     SSelectionData                selection;
 
+    std::mutex              start_reply_mutex;
+     
+    
+    bool                    stream_ready = false;
+    bool                    m_bStreamActive = true;
+
     void                          startCopy();
     void                          initCallbacks();
-    void                          getSourceDimensions(int& width, int& height);
+    void                          getLogicalDimensions(int& width, int& height);
     void                          getTargetDimensions(int& width, int& height);
+
+    ~SSession(); // Destructor declaration
 
     struct {
         bool                                  active              = false;
@@ -59,6 +69,10 @@ struct SSession {
         wl_output_transform                   transform           = WL_OUTPUT_TRANSFORM_NORMAL;
         std::chrono::system_clock::time_point begunFrame          = std::chrono::system_clock::now();
         uint32_t                              copyRetries         = 0;
+
+        // This is our private buffer for the compositor
+        SP<CCWlBuffer>  compositor_wl_buffer = nullptr;
+        gbm_bo*         compositor_gbm_bo    = nullptr;
 
         struct {
             uint32_t w = 0, h = 0, size = 0, stride = 0, fmt = 0;

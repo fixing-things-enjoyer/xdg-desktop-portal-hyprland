@@ -164,7 +164,7 @@ spa_pod* build_format(spa_pod_builder* b, spa_video_format format, uint32_t widt
     spa_pod_builder_add(b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), 0);
     spa_pod_builder_add(b, SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
     /* format */
-    if (modifier_count > 0 || format_without_alpha == SPA_VIDEO_FORMAT_UNKNOWN) {
+    if (modifier_count != 0 || format_without_alpha == SPA_VIDEO_FORMAT_UNKNOWN) {
         // modifiers are defined only in combinations with their format
         // we should not announce the format without alpha
         spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), 0);
@@ -183,6 +183,10 @@ spa_pod* build_format(spa_pod_builder* b, spa_video_format format, uint32_t widt
                 spa_pod_builder_long(b, modifiers[i]);
         }
         spa_pod_builder_pop(b, &f[1]);
+    } else if (modifier_count == 0 && modifiers) {
+        // implicit modifier
+        spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_long(b, *modifiers);
     }
     spa_pod_builder_add(b, SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&SPA_RECTANGLE(width, height)), 0);
     // variable framerate

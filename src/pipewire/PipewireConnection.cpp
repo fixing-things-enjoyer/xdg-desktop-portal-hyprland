@@ -68,19 +68,30 @@ static void pwStreamStateChange(void* data, pw_stream_state old, pw_stream_state
                PSTREAM->pSession->sharingData.nodeID);
 
     switch (state) {
+        case PW_STREAM_STATE_PAUSED:
+            PSTREAM->streamState = false; // CRITICAL: Stop frame production when paused.
+            PSTREAM->pSession->m_bStreamActive = false;
+            Debug::log(LOG, "[pw] Stream paused, halting frame capture.");
+            {
+                std::lock_guard lock(PSTREAM->pSession->start_reply_mutex);
+                PSTREAM->pSession->stream_ready = true;
+            }
+            break;
         case PW_STREAM_STATE_STREAMING:
             PSTREAM->streamState = true;
+            PSTREAM->pSession->m_bStreamActive = true;
+            Debug::log(LOG, "[pw] Stream active, resuming frame capture.");
             
-            if (PSTREAM->pSession->sharingData.status == FRAME_NONE) {
-                Debug::log(LOG, "[screencopy] PipeWire stream is active. Sharing initialized.");
-                g_pPortalManager->m_sPortals.screencopy->startFrameCopy(PSTREAM->pSession);
-            } else {
+            if (PSTREAM->pSession->sharingData.status == FRAME_NONE || old == PW_STREAM_STATE_PAUSED) {
+                Debug::log(LOG, "[screencopy] PipeWire stream is active. Kicking off frame copy.");
+                // This handles both the initial start and recovery from a pause/renegotiation.
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->removeSessionFrameCallbacks(PSTREAM->pSession);
                 g_pPortalManager->m_sPortals.screencopy->startFrameCopy(PSTREAM->pSession);
             }
             break;
-        default: {
+        default: { // Covers ERROR, UNCONNECTED
             PSTREAM->streamState = false;
+            PSTREAM->pSession->m_bStreamActive = false;
             g_pPortalManager->m_sPortals.screencopy->m_pPipewire->removeSessionFrameCallbacks(PSTREAM->pSession);
             break;
         }
@@ -95,13 +106,60 @@ static void pwStreamStateChange(void* data, pw_stream_state old, pw_stream_state
 static void pwStreamParamChanged(void* data, uint32_t id, const spa_pod* param) {
     const auto PSTREAM = (CPipewireConnection::SPWStream*)data;
 
-    Debug::log(TRACE, "[pw] pwStreamParamChanged on {}", (void*)PSTREAM);
+    Debug::log(TRACE, "[pw-diag] pwStreamParamChanged called. Session needs transform: {}", PSTREAM->pSession->selection.needsTransform);
 
     if (id != SPA_PARAM_Format || !param) {
         Debug::log(TRACE, "[pw] invalid call in pwStreamParamChanged");
         return;
     }
 
+    spa_format_video_raw_parse(param, &PSTREAM->pwVideoInfo);
+    PSTREAM->pSession->sharingData.framerate = PSTREAM->pwVideoInfo.max_framerate.num / PSTREAM->pwVideoInfo.max_framerate.denom;
+
+    // --- START: New logic for transform case ---
+    if (PSTREAM->pSession->selection.needsTransform) {
+        Debug::log(LOG, "[pw-diag] Handling transform case in pwStreamParamChanged.");
+        PSTREAM->isDMA = true;
+        uint32_t data_type = 1 << SPA_DATA_DmaBuf;
+
+        spa_pod_dynamic_builder dynBuilder[3];
+        const spa_pod*          params[4];
+        uint8_t                 params_buffer[3][1024];
+
+        spa_pod_dynamic_builder_init(&dynBuilder[0], params_buffer[0], sizeof(params_buffer[0]), 2048);
+        spa_pod_dynamic_builder_init(&dynBuilder[1], params_buffer[1], sizeof(params_buffer[1]), 2048);
+        spa_pod_dynamic_builder_init(&dynBuilder[2], params_buffer[2], sizeof(params_buffer[2]), 2048);
+
+        Debug::log(TRACE, "[pw] Format (transform) renegotiated:");
+        Debug::log(TRACE, "[pw]  | buffer_type DMA");
+        Debug::log(TRACE, "[pw]  | format: {}", (int)PSTREAM->pwVideoInfo.format);
+        Debug::log(TRACE, "[pw]  | modifier: {}", PSTREAM->pwVideoInfo.modifier);
+        Debug::log(TRACE, "[pw]  | size: {}x{}", PSTREAM->pwVideoInfo.size.width, PSTREAM->pwVideoInfo.size.height);
+        Debug::log(TRACE, "[pw]  | framerate {}", PSTREAM->pSession->sharingData.framerate);
+
+        uint32_t blocks = 1;
+        params[0] = build_buffer(&dynBuilder[0].b, blocks, 0, 0, data_type);
+
+        params[1] = (const spa_pod*)spa_pod_builder_add_object(&dynBuilder[1].b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
+                                                               SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
+
+        params[2] = (const spa_pod*)spa_pod_builder_add_object(&dynBuilder[1].b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoTransform),
+                                                               SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_videotransform)));
+
+        params[3] = (const spa_pod*)spa_pod_builder_add_object(
+            &dynBuilder[2].b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoDamage), SPA_PARAM_META_size,
+            SPA_POD_CHOICE_RANGE_Int(sizeof(struct spa_meta_region) * 4, sizeof(struct spa_meta_region) * 1, sizeof(struct spa_meta_region) * 4));
+
+        pw_stream_update_params(PSTREAM->stream, params, 4);
+        spa_pod_dynamic_builder_clean(&dynBuilder[0]);
+        spa_pod_dynamic_builder_clean(&dynBuilder[1]);
+        spa_pod_dynamic_builder_clean(&dynBuilder[2]);
+        return;
+    }
+    // --- END: New logic for transform case ---
+
+
+    // --- START: Original logic for non-transform case ---
     spa_pod_dynamic_builder dynBuilder[3];
     const spa_pod*          params[4];
     uint8_t                 params_buffer[3][1024];
@@ -109,10 +167,6 @@ static void pwStreamParamChanged(void* data, uint32_t id, const spa_pod* param) 
     spa_pod_dynamic_builder_init(&dynBuilder[0], params_buffer[0], sizeof(params_buffer[0]), 2048);
     spa_pod_dynamic_builder_init(&dynBuilder[1], params_buffer[1], sizeof(params_buffer[1]), 2048);
     spa_pod_dynamic_builder_init(&dynBuilder[2], params_buffer[2], sizeof(params_buffer[2]), 2048);
-
-    spa_format_video_raw_parse(param, &PSTREAM->pwVideoInfo);
-    Debug::log(TRACE, "[pw] Framerate: {}/{}", PSTREAM->pwVideoInfo.max_framerate.num, PSTREAM->pwVideoInfo.max_framerate.denom);
-    PSTREAM->pSession->sharingData.framerate = PSTREAM->pwVideoInfo.max_framerate.num / PSTREAM->pwVideoInfo.max_framerate.denom;
 
     uint32_t                   data_type = 1 << SPA_DATA_MemFd;
 
@@ -218,6 +272,7 @@ static void pwStreamParamChanged(void* data, uint32_t id, const spa_pod* param) 
     spa_pod_dynamic_builder_clean(&dynBuilder[0]);
     spa_pod_dynamic_builder_clean(&dynBuilder[1]);
     spa_pod_dynamic_builder_clean(&dynBuilder[2]);
+    // --- END: Original logic for non-transform case ---
 }
 
 static void pwStreamAddBuffer(void* data, pw_buffer* buffer) {
@@ -411,33 +466,43 @@ void CPipewireConnection::destroyStream(SSession* pSession) {
 }
 
 uint32_t CPipewireConnection::buildFormatsFor(spa_pod_builder* b[2], const spa_pod* params[2], CPipewireConnection::SPWStream* stream) {
-    uint32_t  paramCount = 0;
-    uint32_t  modCount   = 0;
-    uint64_t* modifiers  = nullptr;
+    uint32_t paramCount = 0;
 
     int targetWidth, targetHeight;
     stream->pSession->getTargetDimensions(targetWidth, targetHeight);
 
-    if (build_modifierlist(stream, stream->pSession->sharingData.frameInfoDMA.fmt, &modifiers, &modCount) && modCount > 0) {
-        Debug::log(LOG, "[pw] Building modifiers for dma");
+    Debug::log(LOG, "[pw-diag] buildFormatsFor: needsTransform={}, final target dims for PipeWire: {}x{}", stream->pSession->selection.needsTransform, targetWidth, targetHeight);
 
-        paramCount = 2;
-        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoDMA.fmt), targetWidth,
-                                  targetHeight, stream->pSession->sharingData.framerate, modifiers, modCount);
-        assert(params[0] != NULL);
-        params[1] = build_format(b[1], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), targetWidth,
-                                 targetHeight, stream->pSession->sharingData.framerate, NULL, 0);
-        assert(params[1] != NULL);
-    } else {
-        Debug::log(LOG, "[pw] Building modifiers for shm");
-
+    if (stream->pSession->selection.needsTransform) {
+        Debug::log(LOG, "[pw] Building formats for transformed stream. Forcing DMA-BUF format with linear modifier.");
+        // When transforming, we produce a simple linear buffer. We must fixate on this format.
         paramCount = 1;
-        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), targetWidth,
-                                  targetHeight, stream->pSession->sharingData.framerate, NULL, 0);
-    }
+        uint64_t linear_modifier = DRM_FORMAT_MOD_LINEAR;
+        // The modifier_count of 0 with a non-null modifier array tells build_format to use an implicit modifier.
+        params[0] = build_format(b[0], SPA_VIDEO_FORMAT_BGRx, targetWidth, targetHeight, stream->pSession->sharingData.framerate, &linear_modifier, 0);
+        assert(params[0] != NULL);
+    } else {
+        // Original, non-transformed path
+        uint32_t  modCount   = 0;
+        uint64_t* modifiers  = nullptr;
 
-    if (modifiers)
-        free(modifiers);
+        if (build_modifierlist(stream, stream->pSession->sharingData.frameInfoDMA.fmt, &modifiers, &modCount) && modCount > 0) {
+            Debug::log(LOG, "[pw] Building modifiers for dma");
+
+            paramCount = 2;
+            params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoDMA.fmt), targetWidth, targetHeight, stream->pSession->sharingData.framerate, modifiers, modCount);
+            assert(params[0] != NULL);
+            params[1] = build_format(b[1], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), targetWidth, targetHeight, stream->pSession->sharingData.framerate, NULL, 0);
+            assert(params[1] != NULL);
+        } else {
+            Debug::log(LOG, "[pw] Building modifiers for shm");
+
+            paramCount = 1;
+            params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), targetWidth, targetHeight, stream->pSession->sharingData.framerate, NULL, 0);
+        }
+        if (modifiers)
+            free(modifiers);
+    }
 
     return paramCount;
 }
@@ -497,37 +562,53 @@ void CPipewireConnection::enqueue(SSession* pSession) {
         }
     }
 
+    // Correct the damage and size information for transformed frames
+    int targetWidth, targetHeight;
+    pSession->getTargetDimensions(targetWidth, targetHeight);
+
     spa_meta* damage = spa_buffer_find_meta(spaBuf, SPA_META_VideoDamage);
     if (damage) {
         Debug::log(TRACE, "[pw]  | meta has damage");
 
-        spa_region* damageRegion  = (spa_region*)spa_meta_first(damage);
-        uint32_t    damageCounter = 0;
-        do {
-            if (damageCounter >= pSession->sharingData.damageCount) {
-                *damageRegion = SPA_REGION(0, 0, 0, 0);
-                Debug::log(TRACE, "[pw]  | end damage @ {}: {} {} {} {}", damageCounter, damageRegion->position.x, damageRegion->position.y, damageRegion->size.width,
-                           damageRegion->size.height);
-                break;
+        if (pSession->selection.needsTransform) {
+            // For a transformed frame, the entire buffer is new content. Damage is the full area.
+            spa_region* damageRegion = (spa_region*)spa_meta_first(damage);
+            *damageRegion = SPA_REGION(0, 0, targetWidth, targetHeight);
+            Debug::log(TRACE, "[pw]  | transform damage: 0 0 {} {}", targetWidth, targetHeight);
+            // Zero out subsequent damage regions
+            if (spa_meta_check(damageRegion + 1, damage)) {
+                *(damageRegion + 1) = SPA_REGION(0, 0, 0, 0);
             }
+        } else {
+            // Original damage logic for non-transformed frames
+            spa_region* damageRegion  = (spa_region*)spa_meta_first(damage);
+            uint32_t    damageCounter = 0;
+            do {
+                if (damageCounter >= pSession->sharingData.damageCount) {
+                    *damageRegion = SPA_REGION(0, 0, 0, 0);
+                    Debug::log(TRACE, "[pw]  | end damage @ {}: {} {} {} {}", damageCounter, damageRegion->position.x, damageRegion->position.y, damageRegion->size.width,
+                               damageRegion->size.height);
+                    break;
+                }
 
-            *damageRegion = SPA_REGION(pSession->sharingData.damage[damageCounter].x, pSession->sharingData.damage[damageCounter].y, pSession->sharingData.damage[damageCounter].w,
-                                       pSession->sharingData.damage[damageCounter].h);
-            Debug::log(TRACE, "[pw]  | damage @ {}: {} {} {} {}", damageCounter, damageRegion->position.x, damageRegion->position.y, damageRegion->size.width,
-                       damageRegion->size.height);
-            damageCounter++;
-        } while (spa_meta_check(damageRegion + 1, damage) && damageRegion++);
+                *damageRegion = SPA_REGION(pSession->sharingData.damage[damageCounter].x, pSession->sharingData.damage[damageCounter].y, pSession->sharingData.damage[damageCounter].w,
+                                           pSession->sharingData.damage[damageCounter].h);
+                Debug::log(TRACE, "[pw]  | damage @ {}: {} {} {} {}", damageCounter, damageRegion->position.x, damageRegion->position.y, damageRegion->size.width,
+                           damageRegion->size.height);
+                damageCounter++;
+            } while (spa_meta_check(damageRegion + 1, damage) && damageRegion++);
 
-        if (damageCounter < pSession->sharingData.damageCount) {
-            // TODO: merge damage properly
-            *damageRegion = SPA_REGION(0, 0, pSession->sharingData.frameInfoDMA.w, pSession->sharingData.frameInfoDMA.h);
-            Debug::log(TRACE, "[pw]  | damage overflow, damaged whole");
+            if (damageCounter < pSession->sharingData.damageCount) {
+                // TODO: merge damage properly
+                *damageRegion = SPA_REGION(0, 0, pSession->sharingData.frameInfoDMA.w, pSession->sharingData.frameInfoDMA.h);
+                Debug::log(TRACE, "[pw]  | damage overflow, damaged whole");
+            }
         }
     }
 
     spa_data* datas = spaBuf->datas;
 
-    Debug::log(TRACE, "[pw]  | size {}x{}", pSession->sharingData.frameInfoDMA.w, pSession->sharingData.frameInfoDMA.h);
+    Debug::log(TRACE, "[pw]  | size {}x{}", targetWidth, targetHeight);
 
     for (uint32_t plane = 0; plane < spaBuf->n_datas; plane++) {
         datas[plane].chunk->flags = CORRUPT ? SPA_CHUNK_FLAG_CORRUPTED : SPA_CHUNK_FLAG_NONE;
@@ -579,16 +660,27 @@ std::unique_ptr<SBuffer> CPipewireConnection::createBuffer(CPipewireConnection::
     Debug::log(TRACE, "[pw] createBuffer: type {}", dmabuf ? "dma" : "shm");
 
     if (dmabuf) {
-        pBuffer->w   = pStream->pSession->sharingData.frameInfoDMA.w;
-        pBuffer->h   = pStream->pSession->sharingData.frameInfoDMA.h;
-        pBuffer->fmt = pStream->pSession->sharingData.frameInfoDMA.fmt;
+        if (pStream->pSession->selection.needsTransform) {
+            // For transformed streams, the buffer MUST match the negotiated PipeWire format.
+            pStream->pSession->getTargetDimensions(pBuffer->w, pBuffer->h);
+            // We negotiated a simple format, so we create a buffer for that.
+            pBuffer->fmt = DRM_FORMAT_XRGB8888;
+            Debug::log(LOG, "[pw-diag] Creating DMA-BUF for transform: {}x{} fmt: ARGB8888", pBuffer->w, pBuffer->h);
+        } else {
+            // For non-transformed streams, use the native format from the compositor.
+            pBuffer->w   = pStream->pSession->sharingData.frameInfoDMA.w;
+            pBuffer->h   = pStream->pSession->sharingData.frameInfoDMA.h;
+            pBuffer->fmt = pStream->pSession->sharingData.frameInfoDMA.fmt;
+        }
 
         uint32_t flags = GBM_BO_USE_RENDERING;
 
-        if (pStream->pwVideoInfo.modifier != DRM_FORMAT_MOD_INVALID) {
+        if (pStream->pwVideoInfo.modifier != DRM_FORMAT_MOD_INVALID && !pStream->pSession->selection.needsTransform) {
             uint64_t* mods = (uint64_t*)&pStream->pwVideoInfo.modifier;
             pBuffer->bo    = gbm_bo_create_with_modifiers2(g_pPortalManager->m_sWaylandConnection.gbmDevice, pBuffer->w, pBuffer->h, pBuffer->fmt, mods, 1, flags);
         } else {
+            // For transformed streams, we force a linear modifier.
+            flags |= GBM_BO_USE_LINEAR;
             pBuffer->bo = gbm_bo_create(g_pPortalManager->m_sWaylandConnection.gbmDevice, pBuffer->w, pBuffer->h, pBuffer->fmt, flags);
         }
 
@@ -626,7 +718,7 @@ std::unique_ptr<SBuffer> CPipewireConnection::createBuffer(CPipewireConnection::
             params->sendAdd(pBuffer->fd[plane], plane, pBuffer->offset[plane], pBuffer->stride[plane], mod >> 32, mod & 0xffffffff);
         }
 
-        pBuffer->wlBuffer = makeShared<CCWlBuffer>(params->sendCreateImmed(pBuffer->w, pBuffer->h, pBuffer->fmt, /* flags */ (zwpLinuxBufferParamsV1Flags)0));
+        pBuffer->wlBuffer = makeShared<CCWlBuffer>(params->sendCreateImmed(pBuffer->w, pBuffer->h, pBuffer->fmt, (zwpLinuxBufferParamsV1Flags)0));
         params.reset();
 
         if (!pBuffer->wlBuffer) {

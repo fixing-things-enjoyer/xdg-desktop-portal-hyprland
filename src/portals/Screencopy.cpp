@@ -3,6 +3,7 @@
 #include "../helpers/Log.hpp"
 #include "../helpers/MiscFunctions.hpp"
 #include "ScreencopySession.hpp" // Include the new SSession header
+#include "../render/Renderer.hpp" // Include for CRenderer
 
 #include <libdrm/drm_fourcc.h>
 #include <pipewire/pipewire.h>
@@ -16,7 +17,7 @@
 constexpr static int MAX_RETRIES = 10;
 
 //
-static sdbus::Struct<std::string, uint32_t, sdbus::Variant> getFullRestoreStruct(const SSelectionData& data, uint32_t cursor) {
+sdbus::Struct<std::string, uint32_t, sdbus::Variant> CScreencopyPortal::getFullRestoreStruct(const SSelectionData& data, uint32_t cursor) {
     std::unordered_map<std::string, sdbus::Variant> mapData;
 
     switch (data.type) {
@@ -54,6 +55,12 @@ dbUasv CScreencopyPortal::onCreateSession(sdbus::ObjectPath requestHandle, sdbus
         if (PSESSION->sharingData.active) {
             m_pPipewire->destroyStream(PSESSION);
             Debug::log(LOG, "[screencopy] Stream destroyed");
+        }
+        if (PSESSION->sharingData.compositor_gbm_bo) {
+            // The wl_buffer is a smart pointer and will be destroyed automatically.
+            // We just need to destroy the gbm_bo.
+            gbm_bo_destroy(PSESSION->sharingData.compositor_gbm_bo);
+            PSESSION->sharingData.compositor_gbm_bo = nullptr;
         }
         PSESSION->session.release();
         Debug::log(LOG, "[screencopy] Session destroyed");
@@ -218,8 +225,7 @@ dbUasv CScreencopyPortal::onSelectSources(sdbus::ObjectPath requestHandle, sdbus
     return {SHAREDATA.type == TYPE_INVALID ? 1 : 0, {}};
 }
 
-dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::string appID, std::string parentWindow,
-                                  std::unordered_map<std::string, sdbus::Variant> opts) {
+dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> opts) {
     Debug::log(LOG, "[screencopy] Start:");
     Debug::log(LOG, "[screencopy]  | {}", requestHandle.c_str());
     Debug::log(LOG, "[screencopy]  | {}", sessionHandle.c_str());
@@ -236,13 +242,30 @@ dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::Object
 
     startSharing(PSESSION);
 
+    Debug::log(LOG, "[screencopy] onStart entering active wait for stream to be ready...");
+    
+    while (true) {
+        {
+            std::lock_guard lock(PSESSION->start_reply_mutex);
+            if (PSESSION->stream_ready) {
+                break; // Exit loop if flag is set
+            }
+        }
+
+        // Manually drive the PipeWire event loop.
+        // The timeout of 10ms means we check the flag roughly 100 times per second,
+        // while yielding the CPU to avoid a spinlock.
+        pw_loop_iterate(g_pPortalManager->m_sPipewire.loop, 10);
+    }
+    
+    Debug::log(LOG, "[screencopy] onStart active wait complete, stream is ready.");
+    
+    // Build the final reply and return it
     std::unordered_map<std::string, sdbus::Variant> options;
 
     if (PSESSION->selection.allowToken) {
-        // give them a token :)
         options["restore_data"] = sdbus::Variant{getFullRestoreStruct(PSESSION->selection, PSESSION->cursorMode)};
         options["persist_mode"] = sdbus::Variant{uint32_t{2}};
-
         Debug::log(LOG, "[screencopy] Sent restore token to {}", PSESSION->sessionHandle.c_str());
     }
 
@@ -258,9 +281,12 @@ dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::Object
 
     std::vector<sdbus::Struct<uint32_t, std::unordered_map<std::string, sdbus::Variant>>> streams;
 
-    std::unordered_map<std::string, sdbus::Variant>                                       streamData;
+    int targetWidth, targetHeight;
+    PSESSION->getTargetDimensions(targetWidth, targetHeight);
+
+    std::unordered_map<std::string, sdbus::Variant> streamData;
     streamData["position"]    = sdbus::Variant{sdbus::Struct<int32_t, int32_t>{0, 0}};
-    streamData["size"]        = sdbus::Variant{sdbus::Struct<int32_t, int32_t>{PSESSION->sharingData.frameInfoSHM.w, PSESSION->sharingData.frameInfoSHM.h}};
+    streamData["size"]        = sdbus::Variant{sdbus::Struct<int32_t, int32_t>{targetWidth, targetHeight}};
     streamData["source_type"] = sdbus::Variant{uint32_t{type}};
     streams.emplace_back(sdbus::Struct<uint32_t, std::unordered_map<std::string, sdbus::Variant>>{PSESSION->sharingData.nodeID, streamData});
 
@@ -268,6 +294,9 @@ dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::Object
 
     return {0, options};
 }
+
+
+
 
 void CScreencopyPortal::startSharing(SSession* pSession) {
     pSession->sharingData.active = true;
@@ -308,6 +337,19 @@ void CScreencopyPortal::startFrameCopy(SSession* pSession) {
 }
 
 void SSession::startCopy() {
+    if (!m_bStreamActive) {
+        Debug::log(TRACE, "[sc] startCopy: stream not active, skipping frame copy.");
+        return;
+    }
+
+    // --- START: New Guard Clause ---
+    const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
+    if (PSTREAM && !PSTREAM->streamState) {
+        Debug::log(TRACE, "[sc] startCopy: not copying, stream not active");
+        return;
+    }
+    // --- END: New Guard Clause ---
+
     const auto POUTPUT = g_pPortalManager->getOutputFromName(selection.output);
 
     if (!sharingData.active) {
@@ -324,6 +366,8 @@ void SSession::startCopy() {
         Debug::log(ERR, "[screencopy] tried scheduling on already scheduled cb (type {})", (int)selection.type);
         return;
     }
+
+    
 
     if (selection.type == TYPE_GEOMETRY) {
         sharingData.frameCallback = makeShared<CCZwlrScreencopyFrameV1>(g_pPortalManager->m_sPortals.screencopy->m_sState.screencopy->sendCaptureOutputRegion(
@@ -368,7 +412,22 @@ void SSession::initCallbacks() {
             // todo: done if ver < 3
         });
         sharingData.frameCallback->setReady([this](CCZwlrScreencopyFrameV1* r, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec) {
+            // v-- ADD THIS LOG --v
+            Debug::log(LOG, "[sc] wlrOnReady callback has fired.");
             Debug::log(TRACE, "[sc] wlrOnReady for {}", (void*)this);
+
+            if (selection.needsTransform && g_pPortalManager->m_pRenderer) {
+                const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
+                if (PSTREAM && PSTREAM->currentPWBuffer && sharingData.compositor_gbm_bo) {
+                    Debug::log(LOG, "[render] Executing render pass.");
+                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform)) {
+                        Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
+                        sharingData.status = FRAME_NONE;
+                        g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
+                        return;
+                    }
+                }
+            }
 
             sharingData.status = FRAME_READY;
 
@@ -378,6 +437,8 @@ void SSession::initCallbacks() {
 
             Debug::log(TRACE, "[sc] frame timestamp sec: {} nsec: {} combined: {}ns", sharingData.tvSec, sharingData.tvNsec, sharingData.tvTimestampNs);
 
+            // v-- ADD THIS LOG --v
+            Debug::log(LOG, "[sc] Enqueuing frame to PipeWire.");
             g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(this);
 
             if (g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this))
@@ -413,6 +474,45 @@ void SSession::initCallbacks() {
         sharingData.frameCallback->setBufferDone([this](CCZwlrScreencopyFrameV1* r) {
             Debug::log(TRACE, "[sc] wlrOnBufferDone for {}", (void*)this);
 
+            // v-- ADD THIS BLOCK --v
+            // Initialize renderer if it doesn't exist
+            if (!g_pPortalManager->m_pRenderer) {
+                if (g_pPortalManager->m_sWaylandConnection.gbmDevice) {
+                    g_pPortalManager->m_pRenderer = std::make_unique<CRenderer>();
+                    if (!g_pPortalManager->m_pRenderer->m_bGood) {
+                        Debug::log(WARN, "[core] Failed to initialize renderer. Transform will not work.");
+                        g_pPortalManager->m_pRenderer.reset();
+                    }
+                } else {
+                    Debug::log(WARN, "[core] No GBM device, cannot initialize renderer. Transform will not work.");
+                }
+            }
+            // ^-- ADD THIS BLOCK --^
+
+            if (selection.needsTransform && !sharingData.compositor_gbm_bo) {
+                // Use the compositor's reported native dimensions directly
+                int sourceWidth = sharingData.frameInfoDMA.w;
+                int sourceHeight = sharingData.frameInfoDMA.h;
+
+                uint32_t sourceFormat = sharingData.frameInfoDMA.fmt;
+                Debug::log(LOG, "[screencopy] Attempting to create NATIVE-sized GBM BO with: w={}, h={}, format={}", sourceWidth, sourceHeight, sourceFormat);
+
+                sharingData.compositor_gbm_bo = gbm_bo_create(g_pPortalManager->m_sWaylandConnection.gbmDevice, sourceWidth, sourceHeight, sourceFormat, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+                if (!sharingData.compositor_gbm_bo) { Debug::log(ERR, "[screencopy] Failed to create dedicated compositor GBM buffer."); return; }
+                
+                if (!g_pPortalManager->m_sWaylandConnection.linuxDmabuf) { Debug::log(ERR, "[screencopy] zwp_linux_dmabuf_v1 protocol not available, cannot import buffer."); gbm_bo_destroy(sharingData.compositor_gbm_bo); sharingData.compositor_gbm_bo = nullptr; return; }
+
+                auto params = makeShared<CCZwpLinuxBufferParamsV1>(g_pPortalManager->m_sWaylandConnection.linuxDmabuf->sendCreateParams());
+                if (!params) { Debug::log(ERR, "[screencopy] zwp_linux_dmabuf_v1_create_params failed for compositor buffer."); gbm_bo_destroy(sharingData.compositor_gbm_bo); sharingData.compositor_gbm_bo = nullptr; return; }
+                
+                uint64_t modifier = gbm_bo_get_modifier(sharingData.compositor_gbm_bo);
+                params->sendAdd(gbm_bo_get_fd(sharingData.compositor_gbm_bo), 0, 0, gbm_bo_get_stride(sharingData.compositor_gbm_bo), modifier >> 32, modifier & 0xffffffff);
+                sharingData.compositor_wl_buffer = makeShared<CCWlBuffer>(params->sendCreateImmed(sourceWidth, sourceHeight, sourceFormat, (zwpLinuxBufferParamsV1Flags)0));
+                if (!sharingData.compositor_wl_buffer) { Debug::log(ERR, "[screencopy] Failed to create dedicated compositor wl_buffer via dmabuf."); gbm_bo_destroy(sharingData.compositor_gbm_bo); sharingData.compositor_gbm_bo = nullptr; return; }
+                
+                Debug::log(LOG, "[screencopy] Dedicated compositor buffer created successfully.");
+            }
+
             const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
             if (!PSTREAM) {
@@ -430,20 +530,24 @@ void SSession::initCallbacks() {
             Debug::log(TRACE, "[sc] wlr format {} size {}x{}", (int)sharingData.frameInfoSHM.fmt, sharingData.frameInfoSHM.w, sharingData.frameInfoSHM.h);
             Debug::log(TRACE, "[sc] wlr format dma {} size {}x{}", (int)sharingData.frameInfoDMA.fmt, sharingData.frameInfoDMA.w, sharingData.frameInfoDMA.h);
 
-            const auto FMT = PSTREAM->isDMA ? sharingData.frameInfoDMA.fmt : sharingData.frameInfoSHM.fmt;
-            if ((PSTREAM->pwVideoInfo.format != pwFromDrmFourcc(FMT) && PSTREAM->pwVideoInfo.format != pwStripAlpha(pwFromDrmFourcc(FMT))) ||
-                (PSTREAM->pwVideoInfo.size.width != sharingData.frameInfoDMA.w || PSTREAM->pwVideoInfo.size.height != sharingData.frameInfoDMA.h)) {
-                Debug::log(LOG, "[sc] Incompatible formats, renegotiate stream");
-                sharingData.status = FRAME_RENEG;
-                sharingData.frameCallback.reset();
-                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->updateStreamParam(PSTREAM);
-                g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
-                sharingData.status = FRAME_NONE;
-                return;
+            if (!selection.needsTransform) {
+                const auto FMT = PSTREAM->isDMA ? sharingData.frameInfoDMA.fmt : sharingData.frameInfoSHM.fmt;
+                if ((PSTREAM->pwVideoInfo.format != pwFromDrmFourcc(FMT) && PSTREAM->pwVideoInfo.format != pwStripAlpha(pwFromDrmFourcc(FMT))) ||
+                    (PSTREAM->pwVideoInfo.size.width != sharingData.frameInfoDMA.w || PSTREAM->pwVideoInfo.size.height != sharingData.frameInfoDMA.h)) {
+                    Debug::log(LOG, "[sc] Incompatible formats, renegotiate stream");
+                    sharingData.status = FRAME_RENEG;
+                    sharingData.frameCallback.reset();
+                    g_pPortalManager->m_sPortals.screencopy->m_pPipewire->updateStreamParam(PSTREAM);
+                    g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
+                    sharingData.status = FRAME_NONE;
+                    return;
+                }
             }
 
+            
+
             if (!PSTREAM->currentPWBuffer) {
-                Debug::log(TRACE, "[sc] wlrOnBufferDone: dequeue, no current buffer");
+                Debug::log(LOG, "[sc] Dequeuing buffer for render pass.");
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->dequeue(this);
             }
 
@@ -459,7 +563,14 @@ void SSession::initCallbacks() {
                 return;
             }
 
-            sharingData.frameCallback->sendCopyWithDamage(PSTREAM->currentPWBuffer->wlBuffer->resource());
+            if (selection.needsTransform) {
+                // Compositor copies to our dedicated buffer.
+                sharingData.frameCallback->sendCopyWithDamage(sharingData.compositor_wl_buffer->resource());
+            } else {
+                // No transform, compositor copies directly to the PipeWire buffer.
+                sharingData.frameCallback->sendCopyWithDamage(PSTREAM->currentPWBuffer->wlBuffer->resource());
+            }
+
             sharingData.copyRetries = 0;
 
             Debug::log(TRACE, "[sc] wlr frame copied");
@@ -477,7 +588,22 @@ void SSession::initCallbacks() {
             // todo: done if ver < 3
         });
         sharingData.windowFrameCallback->setReady([this](CCHyprlandToplevelExportFrameV1* r, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec) {
+            // v-- ADD THIS LOG --v
+            Debug::log(LOG, "[sc] hlOnReady callback has fired.");
             Debug::log(TRACE, "[sc] hlOnReady for {}", (void*)this);
+
+            if (selection.needsTransform && g_pPortalManager->m_pRenderer) {
+                const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
+                if (PSTREAM && PSTREAM->currentPWBuffer && sharingData.compositor_gbm_bo) {
+                    Debug::log(LOG, "[render] Executing render pass.");
+                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform)) {
+                        Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
+                        sharingData.status = FRAME_NONE;
+                        g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
+                        return;
+                    }
+                }
+            }
 
             sharingData.status = FRAME_READY;
 
@@ -487,6 +613,8 @@ void SSession::initCallbacks() {
 
             Debug::log(TRACE, "[sc] frame timestamp sec: {} nsec: {} combined: {}ns", sharingData.tvSec, sharingData.tvNsec, sharingData.tvTimestampNs);
 
+            // v-- ADD THIS LOG --v
+            Debug::log(LOG, "[sc] Enqueuing frame to PipeWire.");
             g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(this);
 
             if (g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this))
@@ -522,10 +650,54 @@ void SSession::initCallbacks() {
         sharingData.windowFrameCallback->setBufferDone([this](CCHyprlandToplevelExportFrameV1* r) {
             Debug::log(TRACE, "[sc] hlOnBufferDone for {}", (void*)this);
 
+            // v-- ADD THIS BLOCK --v
+            // Initialize renderer if it doesn't exist
+            if (!g_pPortalManager->m_pRenderer) {
+                if (g_pPortalManager->m_sWaylandConnection.gbmDevice) {
+                    g_pPortalManager->m_pRenderer = std::make_unique<CRenderer>();
+                    if (!g_pPortalManager->m_pRenderer->m_bGood) {
+                        Debug::log(WARN, "[core] Failed to initialize renderer. Transform will not work.");
+                        g_pPortalManager->m_pRenderer.reset();
+                    }
+                } else {
+                    Debug::log(WARN, "[core] No GBM device, cannot initialize renderer. Transform will not work.");
+                }
+            }
+            // ^-- ADD THIS BLOCK --^
+
+            if (selection.needsTransform && !sharingData.compositor_gbm_bo) {
+                // Use the compositor's reported native dimensions directly
+                int sourceWidth = sharingData.frameInfoDMA.w;
+                int sourceHeight = sharingData.frameInfoDMA.h;
+
+                uint32_t sourceFormat = sharingData.frameInfoDMA.fmt;
+                Debug::log(LOG, "[screencopy] Attempting to create NATIVE-sized GBM BO with: w={}, h={}, format={}", sourceWidth, sourceHeight, sourceFormat);
+
+                sharingData.compositor_gbm_bo = gbm_bo_create(g_pPortalManager->m_sWaylandConnection.gbmDevice, sourceWidth, sourceHeight, sourceFormat, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+                if (!sharingData.compositor_gbm_bo) { Debug::log(ERR, "[screencopy] Failed to create dedicated compositor GBM buffer."); return; }
+                
+                if (!g_pPortalManager->m_sWaylandConnection.linuxDmabuf) {
+                    Debug::log(ERR, "[screencopy] zwp_linux_dmabuf_v1 protocol not available, cannot import buffer.");
+                    gbm_bo_destroy(sharingData.compositor_gbm_bo);
+                    sharingData.compositor_gbm_bo = nullptr;
+                    return;
+                }
+
+                auto params = makeShared<CCZwpLinuxBufferParamsV1>(g_pPortalManager->m_sWaylandConnection.linuxDmabuf->sendCreateParams());
+                if (!params) { Debug::log(ERR, "[screencopy] zwp_linux_dmabuf_v1_create_params failed for compositor buffer."); gbm_bo_destroy(sharingData.compositor_gbm_bo); sharingData.compositor_gbm_bo = nullptr; return; }
+                
+                uint64_t modifier = gbm_bo_get_modifier(sharingData.compositor_gbm_bo);
+                params->sendAdd(gbm_bo_get_fd(sharingData.compositor_gbm_bo), 0, 0, gbm_bo_get_stride(sharingData.compositor_gbm_bo), modifier >> 32, modifier & 0xffffffff);
+                sharingData.compositor_wl_buffer = makeShared<CCWlBuffer>(params->sendCreateImmed(sourceWidth, sourceHeight, sourceFormat, (zwpLinuxBufferParamsV1Flags)0));
+                if (!sharingData.compositor_wl_buffer) { Debug::log(ERR, "[screencopy] Failed to create dedicated compositor wl_buffer via dmabuf."); gbm_bo_destroy(sharingData.compositor_gbm_bo); sharingData.compositor_gbm_bo = nullptr; return; }
+                
+                Debug::log(LOG, "[screencopy] Dedicated compositor buffer created successfully.");
+            }
+
             const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
             if (!PSTREAM) {
-                // Stream doesn't exist yet, create it now that we have frame info.
+                // Stream doesn\'t exist yet, create it now that we have frame info.
                 Debug::log(LOG, "[screencopy] First frame info received, creating PipeWire stream now.");
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->createStream(this);
                 
@@ -539,20 +711,24 @@ void SSession::initCallbacks() {
             Debug::log(TRACE, "[sc] hl format {} size {}x{}", (int)sharingData.frameInfoSHM.fmt, sharingData.frameInfoSHM.w, sharingData.frameInfoSHM.h);
             Debug::log(TRACE, "[sc] hl format dma {} size {}x{}", (int)sharingData.frameInfoDMA.fmt, sharingData.frameInfoDMA.w, sharingData.frameInfoDMA.h);
 
-            const auto FMT = PSTREAM->isDMA ? sharingData.frameInfoDMA.fmt : sharingData.frameInfoSHM.fmt;
-            if ((PSTREAM->pwVideoInfo.format != pwFromDrmFourcc(FMT) && PSTREAM->pwVideoInfo.format != pwStripAlpha(pwFromDrmFourcc(FMT))) ||
-                (PSTREAM->pwVideoInfo.size.width != sharingData.frameInfoDMA.w || PSTREAM->pwVideoInfo.size.height != sharingData.frameInfoDMA.h)) {
-                Debug::log(LOG, "[sc] Incompatible formats, renegotiate stream");
-                sharingData.status = FRAME_RENEG;
-                sharingData.windowFrameCallback.reset();
-                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->updateStreamParam(PSTREAM);
-                g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
-                sharingData.status = FRAME_NONE;
-                return;
+            if (!selection.needsTransform) {
+                const auto FMT = PSTREAM->isDMA ? sharingData.frameInfoDMA.fmt : sharingData.frameInfoSHM.fmt;
+                if ((PSTREAM->pwVideoInfo.format != pwFromDrmFourcc(FMT) && PSTREAM->pwVideoInfo.format != pwStripAlpha(pwFromDrmFourcc(FMT))) ||
+                    (PSTREAM->pwVideoInfo.size.width != sharingData.frameInfoDMA.w || PSTREAM->pwVideoInfo.size.height != sharingData.frameInfoDMA.h)) {
+                    Debug::log(LOG, "[sc] Incompatible formats, renegotiate stream");
+                    sharingData.status = FRAME_RENEG;
+                    sharingData.windowFrameCallback.reset();
+                    g_pPortalManager->m_sPortals.screencopy->m_pPipewire->updateStreamParam(PSTREAM);
+                    g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
+                    sharingData.status = FRAME_NONE;
+                    return;
+                }
             }
 
+            
+
             if (!PSTREAM->currentPWBuffer) {
-                Debug::log(TRACE, "[sc] hlOnBufferDone: dequeue, no current buffer");
+                Debug::log(LOG, "[sc] Dequeuing buffer for render pass.");
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->dequeue(this);
             }
 
@@ -568,11 +744,26 @@ void SSession::initCallbacks() {
                 return;
             }
 
-            sharingData.windowFrameCallback->sendCopy(PSTREAM->currentPWBuffer->wlBuffer->resource(), false);
+            if (selection.needsTransform) {
+                // Compositor copies to our dedicated buffer.
+                sharingData.windowFrameCallback->sendCopy(sharingData.compositor_wl_buffer->resource(), false);
+            } else {
+                // No transform, compositor copies directly to the PipeWire buffer.
+                sharingData.windowFrameCallback->sendCopy(PSTREAM->currentPWBuffer->wlBuffer->resource(), false);
+            }
+
             sharingData.copyRetries = 0;
 
             Debug::log(TRACE, "[sc] hl frame copied");
         });
+    }
+}
+
+SSession::~SSession() {
+    if (sharingData.compositor_gbm_bo) {
+        gbm_bo_destroy(sharingData.compositor_gbm_bo);
+        sharingData.compositor_gbm_bo = nullptr;
+        Debug::log(LOG, "[screencopy] SSession destructor: Cleaned up compositor_gbm_bo.");
     }
 }
 
@@ -631,28 +822,33 @@ CScreencopyPortal::CScreencopyPortal(SP<CCZwlrScreencopyManagerV1> mgr) {
     Debug::log(LOG, "[screencopy] init successful");
 }
 
-void SSession::getSourceDimensions(int& width, int& height) {
+void SSession::getLogicalDimensions(int& width, int& height) {
     // Start with the native dimensions from the compositor
     width = sharingData.frameInfoDMA.w;
     height = sharingData.frameInfoDMA.h;
+
+    Debug::log(LOG, "[sc-diag] getLogicalDimensions: initial dims {}x{}, transform is {}", width, height, (int)sharingData.transform);
 
     // If the screen is rotated 90/270, the surface dimensions are swapped
     if (sharingData.transform == WL_OUTPUT_TRANSFORM_90 || sharingData.transform == WL_OUTPUT_TRANSFORM_270 ||
         sharingData.transform == WL_OUTPUT_TRANSFORM_FLIPPED_90 || sharingData.transform == WL_OUTPUT_TRANSFORM_FLIPPED_270) {
         std::swap(width, height);
+        Debug::log(LOG, "[sc-diag] getLogicalDimensions: swapped dims to {}x{}", width, height);
     }
 }
 
 void SSession::getTargetDimensions(int& width, int& height) {
     if (selection.needsTransform) {
-        // The target is the "un-rotated" monitor, so we use the native dimensions directly.
+        // When we apply the transform, the target dimensions are the logical
+        // (e.g., vertical) dimensions of the monitor.
+        getLogicalDimensions(width, height);
+    } else {
+        // When we don't transform, we pass the native buffer as-is.
+        // The target dimensions are the native dimensions from the compositor.
         width = sharingData.frameInfoDMA.w;
         height = sharingData.frameInfoDMA.h;
-    } else {
-        // The target is the compositor's surface, which might be rotated.
-        getSourceDimensions(width, height);
     }
-            Debug::log(LOG, "[sc-diag] getTargetDimensions finished. Outputs: width={}, height={}", width, height);
+    Debug::log(LOG, "[sc-diag] getTargetDimensions finished. Target outputs: width={}, height={}", width, height);
 }
 
 void CScreencopyPortal::appendToplevelExport(SP<CCHyprlandToplevelExportManagerV1> proto) {

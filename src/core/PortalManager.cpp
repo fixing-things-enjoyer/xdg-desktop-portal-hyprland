@@ -1,4 +1,5 @@
 #include "PortalManager.hpp"
+#include "../render/Renderer.hpp"
 #include "../helpers/Log.hpp"
 #include "../helpers/MiscFunctions.hpp"
 #include "EventLoopManager.hpp" // Include the new EventLoopManager header

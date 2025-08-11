@@ -63,6 +63,8 @@ pkg_check_modules(
   libspa-0.2
   libdrm
   gbm
+  egl
+  glesv2
   hyprlang>=0.2.0
   hyprutils>=0.2.6
   hyprwayland-scanner>=0.4.2)

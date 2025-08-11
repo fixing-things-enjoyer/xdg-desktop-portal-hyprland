@@ -17,7 +17,7 @@ struct pw_buffer;
 
 struct SBuffer {
     bool           isDMABUF = false;
-    uint32_t       w = 0, h = 0, fmt = 0;
+    int            w = 0, h = 0, fmt = 0;
     int            planeCount = 0;
 
     int            fd[4];
