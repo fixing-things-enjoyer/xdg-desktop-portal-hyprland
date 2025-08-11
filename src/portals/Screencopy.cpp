@@ -195,7 +195,7 @@ dbUasv CScreencopyPortal::onSelectSources(sdbus::ObjectPath requestHandle, sdbus
         SHAREDATA = g_pPortalManager->m_sPortals.screencopyPicker->promptForScreencopySelection(); // Corrected call
     }
 
-    Debug::log(LOG, "[screencopy] SHAREDATA returned selection {}", (int)SHAREDATA.type);
+    Debug::log(LOG, "[screencopy] SHAREDATA returned selection type: {}, needsTransform: {}", (int)SHAREDATA.type, SHAREDATA.needsTransform);
 
     if (SHAREDATA.type == TYPE_WINDOW && !m_sState.toplevel) {
         Debug::log(ERR, "[screencopy] Requested type window for no toplevel export protocol!");
@@ -277,24 +277,26 @@ void CScreencopyPortal::startSharing(SSession* pSession) {
     wl_display_dispatch(g_pPortalManager->m_sWaylandConnection.display);
     wl_display_roundtrip(g_pPortalManager->m_sWaylandConnection.display);
 
-    if (pSession->sharingData.frameInfoDMA.fmt == DRM_FORMAT_INVALID) {
-        Debug::log(ERR, "[screencopy] Couldn't obtain a format from dma"); // todo: blocks shm
-        return;
-    }
+    // This is now handled inside the compositor callback
+    // if (pSession->sharingData.frameInfoDMA.fmt == DRM_FORMAT_INVALID) {
+    //     Debug::log(ERR, "[screencopy] Couldn't obtain a format from dma");
+    //     return;
+    // }
 
-    m_pPipewire->createStream(pSession);
+    // m_pPipewire->createStream(pSession); // <-- COMMENT OUT OR DELETE THIS
 
-    while (pSession->sharingData.nodeID == SPA_ID_INVALID) {
-        int ret = pw_loop_iterate(g_pPortalManager->m_sPipewire.loop, 0);
-        if (ret < 0) {
-            Debug::log(ERR, "[pipewire] pw_loop_iterate failed with {}", spa_strerror(ret));
-            return;
-        }
-    }
+    // The rest of this function will now be triggered by the stream creation itself.
+    // while (pSession->sharingData.nodeID == SPA_ID_INVALID) {
+    //     int ret = pw_loop_iterate(g_pPortalManager->m_sPipewire.loop, 0);
+    //     if (ret < 0) {
+    //         Debug::log(ERR, "[pipewire] pw_loop_iterate failed with {}", spa_strerror(ret));
+    //         return;
+    //     }
+    // }
 
-    Debug::log(LOG, "[screencopy] Sharing initialized");
+    // Debug::log(LOG, "[screencopy] Sharing initialized");
 
-    g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(pSession);
+    // g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(pSession);
 
     Debug::log(TRACE, "[sc] queued frame in {}ms", 1000.0 / pSession->sharingData.framerate);
 }
@@ -405,6 +407,8 @@ void SSession::initCallbacks() {
             sharingData.frameInfoDMA.w   = width;
             sharingData.frameInfoDMA.h   = height;
             sharingData.frameInfoDMA.fmt = format;
+            
+            Debug::log(LOG, "[sc-diag] Compositor reported DMA info: w={}, h={}, transform={}", sharingData.frameInfoDMA.w, sharingData.frameInfoDMA.h, (int)sharingData.transform);
         });
         sharingData.frameCallback->setBufferDone([this](CCZwlrScreencopyFrameV1* r) {
             Debug::log(TRACE, "[sc] wlrOnBufferDone for {}", (void*)this);
@@ -412,9 +416,13 @@ void SSession::initCallbacks() {
             const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
             if (!PSTREAM) {
-                Debug::log(TRACE, "[sc] wlrOnBufferDone: no stream");
-                sharingData.frameCallback.reset();
-                sharingData.status = FRAME_NONE;
+                // Stream doesn't exist yet, create it now that we have frame info.
+                Debug::log(LOG, "[screencopy] First frame info received, creating PipeWire stream now.");
+                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->createStream(this);
+                
+                // Now that the stream is being created, we must wait for it to be ready.
+                // We will re-queue the frame copy from the PipeWire state change handler.
+                // So, we simply return here. The next steps will happen asynchronously.
                 return;
             }
 
@@ -508,6 +516,8 @@ void SSession::initCallbacks() {
             sharingData.frameInfoDMA.w   = width;
             sharingData.frameInfoDMA.h   = height;
             sharingData.frameInfoDMA.fmt = format;
+            
+            Debug::log(LOG, "[sc-diag] Compositor reported DMA info: w={}, h={}, transform={}", sharingData.frameInfoDMA.w, sharingData.frameInfoDMA.h, (int)sharingData.transform);
         });
         sharingData.windowFrameCallback->setBufferDone([this](CCHyprlandToplevelExportFrameV1* r) {
             Debug::log(TRACE, "[sc] hlOnBufferDone for {}", (void*)this);
@@ -515,9 +525,13 @@ void SSession::initCallbacks() {
             const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
             if (!PSTREAM) {
-                Debug::log(TRACE, "[sc] hlOnBufferDone: no stream");
-                sharingData.windowFrameCallback.reset();
-                sharingData.status = FRAME_NONE;
+                // Stream doesn't exist yet, create it now that we have frame info.
+                Debug::log(LOG, "[screencopy] First frame info received, creating PipeWire stream now.");
+                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->createStream(this);
+                
+                // Now that the stream is being created, we must wait for it to be ready.
+                // We will re-queue the frame copy from the PipeWire state change handler.
+                // So, we simply return here. The next steps will happen asynchronously.
                 return;
             }
 
@@ -615,6 +629,30 @@ CScreencopyPortal::CScreencopyPortal(SP<CCZwlrScreencopyManagerV1> mgr) {
     m_pPipewire         = std::make_unique<CPipewireConnection>();
 
     Debug::log(LOG, "[screencopy] init successful");
+}
+
+void SSession::getSourceDimensions(int& width, int& height) {
+    // Start with the native dimensions from the compositor
+    width = sharingData.frameInfoDMA.w;
+    height = sharingData.frameInfoDMA.h;
+
+    // If the screen is rotated 90/270, the surface dimensions are swapped
+    if (sharingData.transform == WL_OUTPUT_TRANSFORM_90 || sharingData.transform == WL_OUTPUT_TRANSFORM_270 ||
+        sharingData.transform == WL_OUTPUT_TRANSFORM_FLIPPED_90 || sharingData.transform == WL_OUTPUT_TRANSFORM_FLIPPED_270) {
+        std::swap(width, height);
+    }
+}
+
+void SSession::getTargetDimensions(int& width, int& height) {
+    if (selection.needsTransform) {
+        // The target is the "un-rotated" monitor, so we use the native dimensions directly.
+        width = sharingData.frameInfoDMA.w;
+        height = sharingData.frameInfoDMA.h;
+    } else {
+        // The target is the compositor's surface, which might be rotated.
+        getSourceDimensions(width, height);
+    }
+            Debug::log(LOG, "[sc-diag] getTargetDimensions finished. Outputs: width={}, height={}", width, height);
 }
 
 void CScreencopyPortal::appendToplevelExport(SP<CCHyprlandToplevelExportManagerV1> proto) {

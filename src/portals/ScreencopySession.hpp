@@ -43,6 +43,8 @@ struct SSession {
 
     void                          startCopy();
     void                          initCallbacks();
+    void                          getSourceDimensions(int& width, int& height);
+    void                          getTargetDimensions(int& width, int& height);
 
     struct {
         bool                                  active              = false;

@@ -70,9 +70,11 @@ static void pwStreamStateChange(void* data, pw_stream_state old, pw_stream_state
     switch (state) {
         case PW_STREAM_STATE_STREAMING:
             PSTREAM->streamState = true;
-            if (PSTREAM->pSession->sharingData.status == FRAME_NONE)
+            
+            if (PSTREAM->pSession->sharingData.status == FRAME_NONE) {
+                Debug::log(LOG, "[screencopy] PipeWire stream is active. Sharing initialized.");
                 g_pPortalManager->m_sPortals.screencopy->startFrameCopy(PSTREAM->pSession);
-            else {
+            } else {
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->removeSessionFrameCallbacks(PSTREAM->pSession);
                 g_pPortalManager->m_sPortals.screencopy->startFrameCopy(PSTREAM->pSession);
             }
@@ -166,8 +168,11 @@ static void pwStreamParamChanged(void* data, uint32_t id, const spa_pod* param) 
             return;
 
         fixate_format:
-            params[0] = fixate_format(&dynBuilder[2].b, pwFromDrmFourcc(PSTREAM->pSession->sharingData.frameInfoDMA.fmt), PSTREAM->pSession->sharingData.frameInfoDMA.w,
-                                      PSTREAM->pSession->sharingData.frameInfoDMA.h, PSTREAM->pSession->sharingData.framerate, &modifier);
+            int targetWidth, targetHeight;
+            PSTREAM->pSession->getTargetDimensions(targetWidth, targetHeight);
+
+            params[0] = fixate_format(&dynBuilder[2].b, pwFromDrmFourcc(PSTREAM->pSession->sharingData.frameInfoDMA.fmt), targetWidth,
+                                      targetHeight, PSTREAM->pSession->sharingData.framerate, &modifier);
 
             n_params = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->buildFormatsFor(builder, &params[1], PSTREAM);
             n_params++;
@@ -410,22 +415,25 @@ uint32_t CPipewireConnection::buildFormatsFor(spa_pod_builder* b[2], const spa_p
     uint32_t  modCount   = 0;
     uint64_t* modifiers  = nullptr;
 
+    int targetWidth, targetHeight;
+    stream->pSession->getTargetDimensions(targetWidth, targetHeight);
+
     if (build_modifierlist(stream, stream->pSession->sharingData.frameInfoDMA.fmt, &modifiers, &modCount) && modCount > 0) {
         Debug::log(LOG, "[pw] Building modifiers for dma");
 
         paramCount = 2;
-        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoDMA.fmt), stream->pSession->sharingData.frameInfoDMA.w,
-                                  stream->pSession->sharingData.frameInfoDMA.h, stream->pSession->sharingData.framerate, modifiers, modCount);
+        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoDMA.fmt), targetWidth,
+                                  targetHeight, stream->pSession->sharingData.framerate, modifiers, modCount);
         assert(params[0] != NULL);
-        params[1] = build_format(b[1], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), stream->pSession->sharingData.frameInfoSHM.w,
-                                 stream->pSession->sharingData.frameInfoSHM.h, stream->pSession->sharingData.framerate, NULL, 0);
+        params[1] = build_format(b[1], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), targetWidth,
+                                 targetHeight, stream->pSession->sharingData.framerate, NULL, 0);
         assert(params[1] != NULL);
     } else {
         Debug::log(LOG, "[pw] Building modifiers for shm");
 
         paramCount = 1;
-        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), stream->pSession->sharingData.frameInfoSHM.w,
-                                  stream->pSession->sharingData.frameInfoSHM.h, stream->pSession->sharingData.framerate, NULL, 0);
+        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), targetWidth,
+                                  targetHeight, stream->pSession->sharingData.framerate, NULL, 0);
     }
 
     if (modifiers)
@@ -480,8 +488,13 @@ void CPipewireConnection::enqueue(SSession* pSession) {
 
     spa_meta_videotransform* vt = (spa_meta_videotransform*)spa_buffer_find_meta_data(spaBuf, SPA_META_VideoTransform, sizeof(*vt));
     if (vt) {
-        vt->transform = pSession->sharingData.transform;
-        Debug::log(LOG, "[pw] PipeWire buffer metadata: setting transform to {}", vt->transform);
+        if (pSession->selection.needsTransform) {
+            vt->transform = WL_OUTPUT_TRANSFORM_NORMAL;
+            Debug::log(LOG, "[pw] PipeWire buffer metadata: forcing transform to NORMAL (0)");
+        } else {
+            vt->transform = pSession->sharingData.transform;
+            Debug::log(LOG, "[pw] PipeWire buffer metadata: setting transform to {}", vt->transform);
+        }
     }
 
     spa_meta* damage = spa_buffer_find_meta(spaBuf, SPA_META_VideoDamage);
