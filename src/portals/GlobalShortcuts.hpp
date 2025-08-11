@@ -46,6 +46,12 @@ class CGlobalShortcutsPortal {
 
     std::unique_ptr<sdbus::IObject> m_pObject;
 
+    // Private implementation helpers for D-Bus methods
+    dbUasv _implCreateSession(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::string appID, std::unordered_map<std::string, sdbus::Variant> opts);
+    dbUasv _implBindShortcuts(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::vector<DBusShortcut> shortcuts, std::string appID,
+                              std::unordered_map<std::string, sdbus::Variant> opts);
+    dbUasv _implListShortcuts(sdbus::ObjectPath sessionHandle, sdbus::ObjectPath requestHandle);
+
     SSession*                       getSession(sdbus::ObjectPath& path);
     SKeybind*                       getShortcutById(const std::string& appID, const std::string& shortcutId);
     SKeybind*                       registerShortcut(SSession* session, const DBusShortcut& shortcut);

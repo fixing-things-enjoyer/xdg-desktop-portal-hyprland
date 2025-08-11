@@ -65,8 +65,8 @@ SKeybind* CGlobalShortcutsPortal::registerShortcut(SSession* session, const DBus
     return PSHORTCUT;
 }
 
-dbUasv CGlobalShortcutsPortal::onCreateSession(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::string appID,
-                                               std::unordered_map<std::string, sdbus::Variant> opts) {
+dbUasv CGlobalShortcutsPortal::_implCreateSession(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::string appID,
+                                                  std::unordered_map<std::string, sdbus::Variant> opts) {
     Debug::log(LOG, "[globalshortcuts] New session:");
     Debug::log(LOG, "[globalshortcuts]  | {}", requestHandle.c_str());
     Debug::log(LOG, "[globalshortcuts]  | {}", sessionHandle.c_str());
@@ -97,8 +97,8 @@ dbUasv CGlobalShortcutsPortal::onCreateSession(sdbus::ObjectPath requestHandle, 
     return {0, {}};
 }
 
-dbUasv CGlobalShortcutsPortal::onBindShortcuts(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::vector<DBusShortcut> shortcuts, std::string appID,
-                                               std::unordered_map<std::string, sdbus::Variant> opts) {
+dbUasv CGlobalShortcutsPortal::_implBindShortcuts(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle, std::vector<DBusShortcut> shortcuts, std::string appID,
+                                                  std::unordered_map<std::string, sdbus::Variant> opts) {
     Debug::log(LOG, "[globalshortcuts] Bind keys:");
     Debug::log(LOG, "[globalshortcuts]  | {}", sessionHandle.c_str());
 
@@ -130,7 +130,7 @@ dbUasv CGlobalShortcutsPortal::onBindShortcuts(sdbus::ObjectPath requestHandle, 
     return {0, data};
 }
 
-dbUasv CGlobalShortcutsPortal::onListShortcuts(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle) {
+dbUasv CGlobalShortcutsPortal::_implListShortcuts(sdbus::ObjectPath requestHandle, sdbus::ObjectPath sessionHandle) {
     Debug::log(LOG, "[globalshortcuts] List keys:");
     Debug::log(LOG, "[globalshortcuts]  | {}", sessionHandle.c_str());
 
@@ -164,12 +164,12 @@ CGlobalShortcutsPortal::CGlobalShortcutsPortal(SP<CCHyprlandGlobalShortcutsManag
     m_pObject
         ->addVTable(sdbus::registerMethod("CreateSession")
                         .implementedAs([this](sdbus::ObjectPath o1, sdbus::ObjectPath o2, std::string s, std::unordered_map<std::string, sdbus::Variant> m) {
-                            return onCreateSession(o1, o2, s, m);
+                            return _implCreateSession(o1, o2, s, m);
                         }),
                     sdbus::registerMethod("BindShortcuts")
                         .implementedAs([this](sdbus::ObjectPath o1, sdbus::ObjectPath o2, std::vector<DBusShortcut> v1, std::string s1,
-                                              std::unordered_map<std::string, sdbus::Variant> m2) { return onBindShortcuts(o1, o2, v1, s1, m2); }),
-                    sdbus::registerMethod("ListShortcuts").implementedAs([this](sdbus::ObjectPath o1, sdbus::ObjectPath o2) { return onListShortcuts(o1, o2); }),
+                                              std::unordered_map<std::string, sdbus::Variant> m2) { return _implBindShortcuts(o1, o2, v1, s1, m2); }),
+                    sdbus::registerMethod("ListShortcuts").implementedAs([this](sdbus::ObjectPath o1, sdbus::ObjectPath o2) { return _implListShortcuts(o1, o2); }),
                     sdbus::registerSignal("Activated").withParameters<sdbus::ObjectPath, std::string, uint64_t, std::unordered_map<std::string, sdbus::Variant>>(),
                     sdbus::registerSignal("Deactivated").withParameters<sdbus::ObjectPath, std::string, uint64_t, std::unordered_map<std::string, sdbus::Variant>>(),
                     sdbus::registerSignal("ShortcutsChanged").withParameters<sdbus::ObjectPath, std::unordered_map<std::string, std::unordered_map<std::string, sdbus::Variant>>>())

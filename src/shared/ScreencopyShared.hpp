@@ -16,6 +16,10 @@ extern "C" {
 #include "wlr-foreign-toplevel-management-unstable-v1.hpp"
 #include "../includes.hpp"
 
+#include "../shared/ToplevelManager.hpp" // Added for CToplevelManager
+#include "../shared/ToplevelMappingManager.hpp" // Added for CToplevelMappingManager
+// Removed: #include "../portals/ScreencopyPicker.hpp" // Removed for CScreencopyPicker
+
 #define XDPH_PWR_BUFFERS     4
 #define XDPH_PWR_BUFFERS_MIN 2
 #define XDPH_PWR_ALIGN       16
@@ -44,7 +48,6 @@ struct SSelectionData {
 
 struct wl_buffer;
 
-SSelectionData   promptForScreencopySelection();
 uint32_t         drmFourccFromSHM(wl_shm_format format);
 spa_video_format pwFromDrmFourcc(uint32_t format);
 wl_shm_format    wlSHMFromDrmFourcc(uint32_t format);

@@ -1,128 +1,133 @@
 #pragma once
 
-#include <memory>
+#include "../includes.hpp" // Moved to top
+
 #include <sdbus-c++/sdbus-c++.h>
-#include <hyprlang.hpp>
+#include <vector>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <mutex>
+#include <condition_variable>
 
-#include "wayland.hpp"
-#include "../portals/Screencopy.hpp"
-#include "../portals/Screenshot.hpp"
-#include "../portals/GlobalShortcuts.hpp"
+#include "../helpers/Log.hpp"
 #include "../helpers/Timer.hpp"
-#include "../shared/ToplevelManager.hpp"
-#include "../shared/ToplevelMappingManager.hpp"
-#include <gbm.h>
-#include <xf86drm.h>
-
-#include "hyprland-toplevel-export-v1.hpp"
-#include "hyprland-global-shortcuts-v1.hpp"
-#include "linux-dmabuf-v1.hpp"
-#include "wlr-foreign-toplevel-management-unstable-v1.hpp"
-#include "wlr-screencopy-unstable-v1.hpp"
-
-#include "../includes.hpp"
+#include "../helpers/MiscFunctions.hpp"
 #include "../dbusDefines.hpp"
 
-#include <mutex>
+// Removed: #include "../portals/Screencopy.hpp"
+// Removed: #include "../portals/GlobalShortcuts.hpp"
+// Removed: #include "../portals/Screenshot.hpp"
+// Removed: #include "../portals/ScreencopyPicker.hpp"
 
-struct pw_loop;
+#include "../protocols/linux-dmabuf-v1.hpp" // Added for CCZwpLinuxDmabufV1 and CCZwpLinuxDmabufFeedbackV1
+#include "../protocols/hyprland-toplevel-mapping-v1.hpp" // Added for CCHyprlandToplevelMappingManagerV1
+
+#include <hyprlang.hpp>
+
+#include <wayland-client.h>
+#include <wayland-client-protocol.h>
+#include <wayland-util.h>
+
+#include <gbm.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+
+#include <pipewire/pipewire.h>
+
+#include "wayland.hpp" // Explicitly included for CCWlOutput, CCWlRegistry, CCWlShm
+
+// Forward declaration for CEventLoopManager
+class CEventLoopManager;
+
+// Forward declarations for Toplevel Managers
+class CToplevelManager;
+class CToplevelMappingManager;
+
+// Forward declarations for Portals
+class CScreencopyPortal;
+class CGlobalShortcutsPortal;
+class CScreenshotPortal;
+class CScreencopyPicker;
 
 struct SOutput {
-    SOutput(SP<CCWlOutput>);
-    std::string         name;
-    SP<CCWlOutput>      output      = nullptr;
-    uint32_t            id          = 0;
-    float               refreshRate = 60.0;
-    wl_output_transform transform   = WL_OUTPUT_TRANSFORM_NORMAL;
+    SOutput(SP<CCWlOutput> output_);
+
+    SP<CCWlOutput>    output;
+    std::string       name;
+    uint32_t          id = 0;
+    int               refreshRate = 0;
+    wl_output_transform transform = WL_OUTPUT_TRANSFORM_NORMAL;
 };
 
+// Definition for SDMABUFModifier
 struct SDMABUFModifier {
-    uint32_t fourcc = 0;
-    uint64_t mod    = 0;
+    uint32_t fourcc;
+    uint64_t mod;
 };
 
 class CPortalManager {
   public:
     CPortalManager();
+    ~CPortalManager(); // Declared destructor
 
-    void                init();
-
-    void                onGlobal(uint32_t name, const char* interface, uint32_t version);
-    void                onGlobalRemoved(uint32_t name);
+    void init();
+    void terminate();
 
     sdbus::IConnection* getConnection();
-    SOutput*            getOutputFromName(const std::string& name);
+    SOutput* getOutputFromName(const std::string& name);
+    gbm_device* createGBMDevice(drmDevice* dev);
+    void addTimer(const CTimer& timer);
+
+    // Public members for CEventLoopManager access
+    std::unique_ptr<sdbus::IConnection> m_pConnection;
+    struct {
+        SP<CCWlRegistry> registry;
+        SP<CCWlShm> shm;
+        SP<CCZwpLinuxDmabufV1> linuxDmabuf;
+        SP<CCZwpLinuxDmabufFeedbackV1> linuxDmabufFeedback;
+        SP<CCHyprlandToplevelExportManagerV1> hyprlandToplevelMgr;
+        wl_display* display;
+        gbm_device* gbmDevice = nullptr;
+        struct {
+            void* formatTable = nullptr;
+            uint32_t formatTableSize = 0;
+            bool done = false;
+            bool deviceUsed = false;
+        } dma;
+    } m_sWaylandConnection;
 
     struct {
         pw_loop* loop = nullptr;
     } m_sPipewire;
 
     struct {
-        std::unique_ptr<CScreencopyPortal>      screencopy;
-        std::unique_ptr<CScreenshotPortal>      screenshot;
+        std::unique_ptr<CScreencopyPortal> screencopy;
         std::unique_ptr<CGlobalShortcutsPortal> globalShortcuts;
+        std::unique_ptr<CScreenshotPortal> screenshot;
+        std::unique_ptr<CScreencopyPicker> screencopyPicker; // Added for CScreencopyPicker
     } m_sPortals;
 
     struct {
-        std::unique_ptr<CToplevelManager>        toplevel;
+        std::unique_ptr<CToplevelManager> toplevel;
         std::unique_ptr<CToplevelMappingManager> toplevelMapping;
     } m_sHelpers;
-
-    struct {
-        wl_display*                           display = nullptr;
-        SP<CCWlRegistry>                      registry;
-        SP<CCHyprlandToplevelExportManagerV1> hyprlandToplevelMgr;
-        SP<CCZwpLinuxDmabufV1>                linuxDmabuf;
-        SP<CCZwpLinuxDmabufFeedbackV1>        linuxDmabufFeedback;
-        SP<CCWlShm>                           shm;
-        gbm_bo*                               gbm       = nullptr;
-        gbm_device*                           gbmDevice = nullptr;
-        struct {
-            void*  formatTable     = nullptr;
-            size_t formatTableSize = 0;
-            bool   deviceUsed      = false;
-            bool   done            = false;
-        } dma;
-    } m_sWaylandConnection;
 
     struct {
         std::unique_ptr<Hyprlang::CConfig> config;
     } m_sConfig;
 
+    std::vector<std::unique_ptr<SOutput>> m_vOutputs;
     std::vector<SDMABUFModifier> m_vDMABUFMods;
 
-    void                         addTimer(const CTimer& timer);
-
-    gbm_device*                  createGBMDevice(drmDevice* dev);
-
-    // terminate after the event loop has been created. Before we can exit()
-    void terminate();
+    bool m_bTerminate = false;
+    pid_t m_iPID = 0;
 
   private:
-    void  startEventLoop();
+    void onGlobal(uint32_t name, const char* interface, uint32_t version);
+    void onGlobalRemoved(uint32_t name);
 
-    bool  m_bTerminate = false;
-    pid_t m_iPID       = 0;
-
-    struct {
-        std::condition_variable loopSignal;
-        std::mutex              loopMutex;
-        std::atomic<bool>       shouldProcess = false;
-        std::mutex              loopRequestMutex;
-    } m_sEventLoopInternals;
-
-    struct {
-        std::condition_variable              loopSignal;
-        std::mutex                           loopMutex;
-        bool                                 shouldProcess = false;
-        std::vector<std::unique_ptr<CTimer>> timers;
-        std::unique_ptr<std::thread>         thread;
-    } m_sTimersThread;
-
-    std::unique_ptr<sdbus::IConnection>   m_pConnection;
-    std::vector<std::unique_ptr<SOutput>> m_vOutputs;
-
-    std::mutex                            m_mEventLock;
+    std::unique_ptr<CEventLoopManager> m_pEventLoopManager;
 };
 
 inline std::unique_ptr<CPortalManager> g_pPortalManager;

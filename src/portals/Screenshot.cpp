@@ -8,8 +8,24 @@
 
 std::string lastScreenshot;
 
-//
-static dbUasv pickHyprPicker(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
+CScreenshotPortal::CScreenshotPortal() {
+    m_pObject = sdbus::createObject(*g_pPortalManager->getConnection(), OBJECT_PATH);
+
+    m_pObject
+        ->addVTable(
+            sdbus::registerMethod("Screenshot").implementedAs([this](sdbus::ObjectPath o, std::string s1, std::string s2, std::unordered_map<std::string, sdbus::Variant> m) {
+                return _implScreenshot(o, s1, s2, m);
+            }),
+            sdbus::registerMethod("PickColor").implementedAs([this](sdbus::ObjectPath o, std::string s1, std::string s2, std::unordered_map<std::string, sdbus::Variant> m) {
+                return _implPickColor(o, s1, s2, m);
+            }),
+            sdbus::registerProperty("version").withGetter([]() { return uint32_t{2}; }))
+        .forInterface(INTERFACE_NAME);
+
+    Debug::log(LOG, "[screenshot] init successful");
+}
+
+dbUasv CScreenshotPortal::pickHyprPicker(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
     const std::string HYPRPICKER_CMD = "hyprpicker --format=rgb --no-fancy";
     std::string       rgbColor       = execAndGet(HYPRPICKER_CMD.c_str());
 
@@ -45,7 +61,7 @@ static dbUasv pickHyprPicker(sdbus::ObjectPath requestHandle, std::string appID,
     return {0, results};
 }
 
-static dbUasv pickSlurp(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
+dbUasv CScreenshotPortal::pickSlurp(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
     const std::string PICK_COLOR_CMD = "grim -g \"$(slurp -p)\" -t ppm -";
     std::string       ppmColor       = execAndGet(PICK_COLOR_CMD.c_str());
 
@@ -91,24 +107,7 @@ static dbUasv pickSlurp(sdbus::ObjectPath requestHandle, std::string appID, std:
     return {1, {}};
 }
 
-CScreenshotPortal::CScreenshotPortal() {
-    m_pObject = sdbus::createObject(*g_pPortalManager->getConnection(), OBJECT_PATH);
-
-    m_pObject
-        ->addVTable(
-            sdbus::registerMethod("Screenshot").implementedAs([this](sdbus::ObjectPath o, std::string s1, std::string s2, std::unordered_map<std::string, sdbus::Variant> m) {
-                return onScreenshot(o, s1, s2, m);
-            }),
-            sdbus::registerMethod("PickColor").implementedAs([this](sdbus::ObjectPath o, std::string s1, std::string s2, std::unordered_map<std::string, sdbus::Variant> m) {
-                return onPickColor(o, s1, s2, m);
-            }),
-            sdbus::registerProperty("version").withGetter([]() { return uint32_t{2}; }))
-        .forInterface(INTERFACE_NAME);
-
-    Debug::log(LOG, "[screenshot] init successful");
-}
-
-dbUasv CScreenshotPortal::onScreenshot(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
+dbUasv CScreenshotPortal::_implScreenshot(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
 
     Debug::log(LOG, "[screenshot] New screenshot request:");
     Debug::log(LOG, "[screenshot]  | {}", requestHandle.c_str());
@@ -122,7 +121,7 @@ dbUasv CScreenshotPortal::onScreenshot(sdbus::ObjectPath requestHandle, std::str
     srand(time(nullptr));
 
     const std::string                               HYPR_DIR             = RUNTIME_DIR ? std::string{RUNTIME_DIR} + "/hypr/" : "/tmp/hypr/";
-    const std::string                               SNAP_FILE            = std::format("xdph_screenshot_{:x}.png", rand()); // rand() is good enough
+    const std::string                               SNAP_FILE            = std::format("xdph_screenshot_{{:x}}.png", rand()); // rand() is good enough
     const std::string                               FILE_PATH            = HYPR_DIR + SNAP_FILE;
     const std::string                               SNAP_CMD             = "grim '" + FILE_PATH + "'";
     const std::string                               SNAP_INTERACTIVE_CMD = "grim -g \"$(slurp)\" '" + FILE_PATH + "'";
@@ -148,7 +147,7 @@ dbUasv CScreenshotPortal::onScreenshot(sdbus::ObjectPath requestHandle, std::str
     return {responseCode, results};
 }
 
-dbUasv CScreenshotPortal::onPickColor(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
+dbUasv CScreenshotPortal::_implPickColor(sdbus::ObjectPath requestHandle, std::string appID, std::string parentWindow, std::unordered_map<std::string, sdbus::Variant> options) {
 
     Debug::log(LOG, "[screenshot] New PickColor request:");
     Debug::log(LOG, "[screenshot]  | {}", requestHandle.c_str());

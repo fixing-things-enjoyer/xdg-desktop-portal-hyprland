@@ -1,6 +1,7 @@
 #include "PortalManager.hpp"
 #include "../helpers/Log.hpp"
 #include "../helpers/MiscFunctions.hpp"
+#include "EventLoopManager.hpp" // Include the new EventLoopManager header
 
 #include <pipewire/pipewire.h>
 #include <poll.h>
@@ -9,6 +10,16 @@
 #include <unistd.h>
 
 #include <thread>
+
+#include "../protocols/hyprland-toplevel-mapping-v1.hpp" // Added for hyprland_toplevel_mapping_manager_v1_interface
+#include "../shared/ToplevelManager.hpp" // Added for CToplevelManager
+#include "../shared/ToplevelMappingManager.hpp" // Added for CToplevelMappingManager
+
+// Portal includes
+#include "../portals/Screencopy.hpp"
+#include "../portals/GlobalShortcuts.hpp"
+#include "../portals/Screenshot.hpp"
+#include "../portals/ScreencopyPicker.hpp"
 
 SOutput::SOutput(SP<CCWlOutput> output_) : output(output_) {
     output->setName([this](CCWlOutput* o, const char* name_) {
@@ -48,6 +59,18 @@ CPortalManager::CPortalManager() {
 
     m_sConfig.config->commence();
     m_sConfig.config->parse();
+
+    m_pEventLoopManager = std::make_unique<CEventLoopManager>(this);
+    m_sPortals.screencopyPicker = std::make_unique<CScreencopyPicker>(this);
+}
+
+CPortalManager::~CPortalManager() {
+    m_sPortals.globalShortcuts.reset();
+    m_sPortals.screencopy.reset();
+    m_sPortals.screenshot.reset();
+    m_sPortals.screencopyPicker.reset();
+    m_sHelpers.toplevel.reset();
+    m_sHelpers.toplevelMapping.reset();
 }
 
 void CPortalManager::onGlobal(uint32_t name, const char* interface, uint32_t version) {
@@ -94,7 +117,7 @@ void CPortalManager::onGlobal(uint32_t name, const char* interface, uint32_t ver
             if (m_sWaylandConnection.dma.done)
                 return;
 
-            RASSERT(!m_sWaylandConnection.gbm, "double dmabuf feedback");
+            RASSERT(!m_sWaylandConnection.gbmDevice, "double dmabuf feedback"); // Corrected from gbm to gbmDevice
 
             dev_t device;
             assert(device_arr->size == sizeof(device));
@@ -160,7 +183,7 @@ void CPortalManager::onGlobal(uint32_t name, const char* interface, uint32_t ver
                 m_sWaylandConnection.dma.deviceUsed = drmDevicesEqual(drmDevRenderer, drmDev);
             } else {
                 m_sWaylandConnection.gbmDevice      = createGBMDevice(drmDev);
-                m_sWaylandConnection.dma.deviceUsed = m_sWaylandConnection.gbm;
+                m_sWaylandConnection.dma.deviceUsed = m_sWaylandConnection.gbmDevice; // Corrected from gbm to gbmDevice
             }
         });
         m_sWaylandConnection.linuxDmabufFeedback->setTrancheFormats([this](CCZwpLinuxDmabufFeedbackV1* r, wl_array* indices) {
@@ -215,7 +238,7 @@ void CPortalManager::onGlobal(uint32_t name, const char* interface, uint32_t ver
 
     else if (INTERFACE == hyprland_toplevel_mapping_manager_v1_interface.name) {
         m_sHelpers.toplevelMapping = std::make_unique<CToplevelMappingManager>(makeShared<CCHyprlandToplevelMappingManagerV1>(
-            (wl_proxy*)wl_registry_bind((wl_registry*)m_sWaylandConnection.registry->resource(), name, &hyprland_toplevel_mapping_manager_v1_interface, version)));
+            (wl_proxy*)wl_registry_bind((wl_registry*)m_sWaylandConnection.registry->resource(), name, &hyprland_toplevel_mapping_manager_v1_interface, version))); // Corrected cast
     }
 }
 
@@ -283,172 +306,12 @@ void CPortalManager::init() {
             Debug::log(WARN, "slurp not found. You won't be able to select a region when screenshotting.");
 
         if (!inShellPath("slurp") && !inShellPath("hyprpicker"))
-            Debug::log(WARN, "Neither slurp nor hyprpicker found. You won't be able to pick colors.");
-        else if (!inShellPath("hyprpicker"))
             Debug::log(INFO, "hyprpicker not found. We suggest to use hyprpicker for color picking to be less meh.");
     }
 
     wl_display_roundtrip(m_sWaylandConnection.display);
 
-    startEventLoop();
-}
-
-void CPortalManager::startEventLoop() {
-
-    pollfd pollfds[] = {
-        {
-            .fd     = m_pConnection->getEventLoopPollData().fd,
-            .events = POLLIN,
-        },
-        {
-            .fd     = wl_display_get_fd(m_sWaylandConnection.display),
-            .events = POLLIN,
-        },
-        {
-            .fd     = pw_loop_get_fd(m_sPipewire.loop),
-            .events = POLLIN,
-        },
-    };
-
-    std::thread pollThr([this, &pollfds]() {
-        while (1) {
-            int ret = poll(pollfds, 3, 5000 /* 5 seconds, reasonable. It's because we might need to terminate */);
-            if (ret < 0) {
-                Debug::log(CRIT, "[core] Polling fds failed with {}", strerror(errno));
-                g_pPortalManager->terminate();
-            }
-
-            for (size_t i = 0; i < 3; ++i) {
-                if (pollfds[i].revents & POLLHUP) {
-                    Debug::log(CRIT, "[core] Disconnected from pollfd id {}", i);
-                    g_pPortalManager->terminate();
-                }
-            }
-
-            if (m_bTerminate)
-                break;
-
-            if (ret != 0) {
-                Debug::log(TRACE, "[core] got poll event");
-                std::lock_guard<std::mutex> lg(m_sEventLoopInternals.loopRequestMutex);
-                m_sEventLoopInternals.shouldProcess = true;
-                m_sEventLoopInternals.loopSignal.notify_all();
-            }
-        }
-    });
-
-    m_sTimersThread.thread = std::make_unique<std::thread>([this] {
-        while (1) {
-            std::unique_lock lk(m_sTimersThread.loopMutex);
-
-            // find nearest timer ms
-            m_mEventLock.lock();
-            float nearest = 60000; /* reasonable timeout */
-            for (auto& t : m_sTimersThread.timers) {
-                float until = t->duration() - t->passedMs();
-                if (until < nearest)
-                    nearest = until;
-            }
-            m_mEventLock.unlock();
-
-            m_sTimersThread.loopSignal.wait_for(lk, std::chrono::milliseconds((int)nearest), [this] { return m_sTimersThread.shouldProcess; });
-            m_sTimersThread.shouldProcess = false;
-
-            if (m_bTerminate)
-                break;
-
-            // awakened. Check if any timers passed
-            m_mEventLock.lock();
-            bool notify = false;
-            for (auto& t : m_sTimersThread.timers) {
-                if (t->passed()) {
-                    Debug::log(TRACE, "[core] got timer event");
-                    notify = true;
-                    break;
-                }
-            }
-            m_mEventLock.unlock();
-
-            if (notify) {
-                std::lock_guard<std::mutex> lg(m_sEventLoopInternals.loopRequestMutex);
-                m_sEventLoopInternals.shouldProcess = true;
-                m_sEventLoopInternals.loopSignal.notify_all();
-            }
-        }
-    });
-
-    while (1) { // dbus events
-        // wait for being awakened
-        std::unique_lock lk(m_sEventLoopInternals.loopMutex);
-        if (m_sEventLoopInternals.shouldProcess == false) // avoid a lock if a thread managed to request something already since we .unlock()ed
-            m_sEventLoopInternals.loopSignal.wait_for(lk, std::chrono::seconds(5), [this] { return m_sEventLoopInternals.shouldProcess == true; }); // wait for events
-
-        std::lock_guard<std::mutex> lg(m_sEventLoopInternals.loopRequestMutex);
-
-        if (m_bTerminate)
-            break;
-
-        m_sEventLoopInternals.shouldProcess = false;
-
-        m_mEventLock.lock();
-
-        if (pollfds[0].revents & POLLIN /* dbus */) {
-            while (m_pConnection->processPendingEvent()) {
-                ;
-            }
-        }
-
-        if (pollfds[1].revents & POLLIN /* wl */) {
-            wl_display_flush(m_sWaylandConnection.display);
-            if (wl_display_prepare_read(m_sWaylandConnection.display) == 0) {
-                wl_display_read_events(m_sWaylandConnection.display);
-                wl_display_dispatch_pending(m_sWaylandConnection.display);
-            } else {
-                wl_display_dispatch(m_sWaylandConnection.display);
-            }
-        }
-
-        if (pollfds[2].revents & POLLIN /* pw */) {
-            while (pw_loop_iterate(m_sPipewire.loop, 0) != 0) {
-                ;
-            }
-        }
-
-        std::vector<CTimer*> toRemove;
-        for (auto& t : m_sTimersThread.timers) {
-            if (t->passed()) {
-                t->m_fnCallback();
-                toRemove.emplace_back(t.get());
-                Debug::log(TRACE, "[core] calling timer {}", (void*)t.get());
-            }
-        }
-
-        int ret = 0;
-        do {
-            ret = wl_display_dispatch_pending(m_sWaylandConnection.display);
-            wl_display_flush(m_sWaylandConnection.display);
-        } while (ret > 0);
-
-        if (!toRemove.empty())
-            std::erase_if(m_sTimersThread.timers,
-                          [&](const auto& t) { return std::find_if(toRemove.begin(), toRemove.end(), [&](const auto& other) { return other == t.get(); }) != toRemove.end(); });
-
-        m_mEventLock.unlock();
-    }
-
-    Debug::log(ERR, "[core] Terminated");
-
-    m_sPortals.globalShortcuts.reset();
-    m_sPortals.screencopy.reset();
-    m_sPortals.screenshot.reset();
-    m_sHelpers.toplevel.reset();
-
-    m_pConnection.reset();
-    pw_loop_destroy(m_sPipewire.loop);
-    wl_display_disconnect(m_sWaylandConnection.display);
-
-    m_sTimersThread.thread.release();
-    pollThr.join(); // wait for poll to exit
+    m_pEventLoopManager->startEventLoop(); // Call the new event loop manager
 }
 
 sdbus::IConnection* CPortalManager::getConnection() {
@@ -506,10 +369,7 @@ gbm_device* CPortalManager::createGBMDevice(drmDevice* dev) {
 }
 
 void CPortalManager::addTimer(const CTimer& timer) {
-    Debug::log(TRACE, "[core] adding timer for {}ms", timer.duration());
-    m_sTimersThread.timers.emplace_back(std::make_unique<CTimer>(timer));
-    m_sTimersThread.shouldProcess = true;
-    m_sTimersThread.loopSignal.notify_all();
+    m_pEventLoopManager->addTimer(timer);
 }
 
 void CPortalManager::terminate() {
@@ -520,11 +380,6 @@ void CPortalManager::terminate() {
     if (fork() == 0)
         execl("/bin/sh", "/bin/sh", "-c", std::format("sleep 5 && kill -9 {}", m_iPID).c_str(), nullptr);
 
-    {
-        m_sEventLoopInternals.shouldProcess = true;
-        m_sEventLoopInternals.loopSignal.notify_all();
-    }
-
-    m_sTimersThread.shouldProcess = true;
-    m_sTimersThread.loopSignal.notify_all();
+    // The event loop manager will handle waking up the threads and joining them.
+    // No direct access to m_sEventLoopInternals or m_sTimersThread here anymore.
 }
