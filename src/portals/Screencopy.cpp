@@ -421,11 +421,18 @@ void SSession::initCallbacks() {
             if (selection.needsTransform && g_pPortalManager->m_pRenderer) {
                 const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
                 if (PSTREAM && PSTREAM->currentPWBuffer && sharingData.compositor_gbm_bo) {
+                    const SRenderBox* pCrop = nullptr;
                     SRenderBox cropBox;
-                    getPhysicalCastingBox(&cropBox);
-                    
-                    Debug::log(LOG, "[render] Executing render pass with crop.");
-                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, &cropBox)) {
+
+                    if (selection.type == TYPE_GEOMETRY) {
+                        getPhysicalCastingBox(&cropBox);
+                        pCrop = &cropBox;
+                        Debug::log(LOG, "[render] Executing render pass with crop.");
+                    } else {
+                        Debug::log(LOG, "[render] Executing render pass for full screen.");
+                    }
+
+                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, pCrop)) {
                         Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
                         sharingData.status = FRAME_NONE;
                         g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
@@ -600,11 +607,18 @@ void SSession::initCallbacks() {
             if (selection.needsTransform && g_pPortalManager->m_pRenderer) {
                 const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
                 if (PSTREAM && PSTREAM->currentPWBuffer && sharingData.compositor_gbm_bo) {
+                    const SRenderBox* pCrop = nullptr;
                     SRenderBox cropBox;
-                    getPhysicalCastingBox(&cropBox);
-                    
-                    Debug::log(LOG, "[render] Executing render pass with crop.");
-                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, &cropBox)) {
+
+                    if (selection.type == TYPE_GEOMETRY) {
+                        getPhysicalCastingBox(&cropBox);
+                        pCrop = &cropBox;
+                        Debug::log(LOG, "[render] Executing render pass with crop.");
+                    } else {
+                        Debug::log(LOG, "[render] Executing render pass for full screen.");
+                    }
+
+                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, pCrop)) {
                         Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
                         sharingData.status = FRAME_NONE;
                         g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
