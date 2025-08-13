@@ -1,3 +1,18 @@
+[!NOTE]
+### Experimental Fix for Rotated/Vertical Monitors
+
+This fork of `xdg-desktop-portal-hyprland` contains an experimental workaround for screen and region sharing on **rotated/vertical monitor setups**, where fullscreen streams may appear sideways or "Select region..." streams appear misoriented and mislocated.
+
+It introduces a **"Force software transform (compatibility)"** option in the share picker. When enabled, it uses a client-side renderer to correctly orient the stream.
+
+This solution is almost entirely vibe-coded. Heavy refactoring took place to mitigate context blowout on vibe-tennis and keep the robots coherent.
+
+**Please be aware of the trade-offs:**
+*   **Performance:** This method has higher CPU/GPU overhead than the native path.
+*   **Initial Stream Delay:** Viewers may briefly see a green screen or experience a delay when first joining a stream. This is a known artifact of this specific workaround.
+
+This is a **temporary solution**. The fundamental fix belongs upstream in the compositor (Hyprland/wlroots). This fork is provided as-is to help users in the meantime.
+
 # xdg-desktop-portal-hyprland
 
 An [XDG Desktop Portal](https://github.com/flatpak/xdg-desktop-portal) backend
@@ -35,7 +50,7 @@ sudo cmake --install build
 
 > [!CAUTION]
 > XDPH should not be used from this flake directly!
-> 
+>
 > Instead, use it from the [Hyprland flake](https://github.com/hyprwm/Hyprland).
 
 There are two reasons for the above:
