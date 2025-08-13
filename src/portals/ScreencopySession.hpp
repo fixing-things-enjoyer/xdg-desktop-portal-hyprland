@@ -9,6 +9,7 @@
 #include "wlr-screencopy-unstable-v1.hpp"
 #include "hyprland-toplevel-export-v1.hpp"
 #include "../shared/Session.hpp" // Explicitly include Session.hpp for SDBusRequest and SDBusSession
+#include <gbm.h> // Added for gbm_bo
 
 // Forward declaration for CScreencopyPortal if needed within SSession
 class CScreencopyPortal;
@@ -33,6 +34,11 @@ enum frameStatus {
     FRAME_RENEG,
 };
 
+struct SRenderBox {
+    int x = 0, y = 0;
+    int w = 0, h = 0;
+};
+
 struct SSession {
     std::string                   appid;
     sdbus::ObjectPath             requestHandle, sessionHandle;
@@ -53,6 +59,8 @@ struct SSession {
     void                          initCallbacks();
     void                          getLogicalDimensions(int& width, int& height);
     void                          getTargetDimensions(int& width, int& height);
+
+    void getPhysicalCastingBox(SRenderBox* pBox); // Add this method declaration
 
     ~SSession(); // Destructor declaration
 

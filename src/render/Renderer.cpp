@@ -261,7 +261,7 @@ CRenderer::CRenderer() {
     m_bGood = true;
 }
 
-bool CRenderer::render(gbm_bo* RENDER_BO, gbm_bo* SOURCE_BO, wl_output_transform transform) {
+bool CRenderer::render(gbm_bo* RENDER_BO, gbm_bo* SOURCE_BO, wl_output_transform transform, const SRenderBox* pCrop = nullptr) {
     if (!m_bGood || !RENDER_BO || !SOURCE_BO) {
         Debug::log(ERR, "[render] Render call failed: bad renderer or null buffer");
         return false;
@@ -398,19 +398,33 @@ bool CRenderer::render(gbm_bo* RENDER_BO, gbm_bo* SOURCE_BO, wl_output_transform
     glUseProgram(m_uShader);
     checkGLError("glUseProgram");
     
-    // Vertex data for a full-screen quad
+    // --- VVV NEW LOGIC START VVV ---
+    GLfloat u_start = 0.0f, v_start = 0.0f, u_end = 1.0f, v_end = 1.0f;
+    if (pCrop) {
+        Debug::log(TRACE, "[render] Using crop box: x={}, y={}, w={}, h={}", pCrop->x, pCrop->y, pCrop->w, pCrop->h);
+        const float source_w = gbm_bo_get_width(SOURCE_BO);
+        const float source_h = gbm_bo_get_height(SOURCE_BO);
+        u_start = pCrop->x / source_w;
+        v_start = pCrop->y / source_h;
+        u_end = (pCrop->x + pCrop->w) / source_w;
+        v_end = (pCrop->y + pCrop->h) / source_h;
+    }
+
     const GLfloat verts[] = {
-        0, 1, // Top-left
-        1, 1, // Top-right
-        1, 0, // Bottom-right
-        0, 0  // Bottom-left
+        0.0f, 1.0f, // Top-left
+        1.0f, 1.0f, // Top-right
+        1.0f, 0.0f, // Bottom-right
+        0.0f, 0.0f  // Bottom-left
     };
+    
+    // NOTE: The V coordinate is inverted. texture (0,0) is bottom-left.
     const GLfloat texcoords[] = {
-        0, 1,
-        1, 1,
-        1, 0,
-        0, 0
+        u_start, v_end,   // For vertex Top-left
+        u_end,   v_end,   // For vertex Top-right
+        u_end,   v_start, // For vertex Bottom-right
+        u_start, v_start  // For vertex Bottom-left
     };
+    // --- ^^^ NEW LOGIC END ^^^ ---
     
     glVertexAttribPointer(m_sAttribs.pos, 2, GL_FLOAT, GL_FALSE, 0, verts);
     checkGLError("glVertexAttribPointer (pos)");

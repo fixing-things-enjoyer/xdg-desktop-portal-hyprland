@@ -369,16 +369,18 @@ void SSession::startCopy() {
 
     
 
-    if (selection.type == TYPE_GEOMETRY) {
+    if (selection.type == TYPE_GEOMETRY && !selection.needsTransform) {
+        // This is the original, non-compatibility path for region selection. It remains unchanged.
         sharingData.frameCallback = makeShared<CCZwlrScreencopyFrameV1>(g_pPortalManager->m_sPortals.screencopy->m_sState.screencopy->sendCaptureOutputRegion(
             cursorMode, POUTPUT->output->resource(), selection.x, selection.y, selection.w, selection.h));
         sharingData.transform     = POUTPUT->transform;
         Debug::log(LOG, "[screencopy] Session for output region {} using transform {}", POUTPUT->name, (int)POUTPUT->transform);
-    } else if (selection.type == TYPE_OUTPUT) {
+    } else if (selection.type == TYPE_OUTPUT || (selection.type == TYPE_GEOMETRY && selection.needsTransform)) {
+        // This now handles both full-screen selection and region selection when compatibility mode is on.
         sharingData.frameCallback =
             makeShared<CCZwlrScreencopyFrameV1>(g_pPortalManager->m_sPortals.screencopy->m_sState.screencopy->sendCaptureOutput(cursorMode, POUTPUT->output->resource()));
         sharingData.transform = POUTPUT->transform;
-        Debug::log(LOG, "[screencopy] Session for output {} using transform {}", POUTPUT->name, (int)POUTPUT->transform);
+        Debug::log(LOG, "[screencopy] Session for output {} (or region with transform) using transform {}", POUTPUT->name, (int)POUTPUT->transform);
     } else if (selection.type == TYPE_WINDOW) {
         if (!selection.windowHandle) {
             Debug::log(ERR, "[screencopy] selected invalid window?");
@@ -419,8 +421,11 @@ void SSession::initCallbacks() {
             if (selection.needsTransform && g_pPortalManager->m_pRenderer) {
                 const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
                 if (PSTREAM && PSTREAM->currentPWBuffer && sharingData.compositor_gbm_bo) {
-                    Debug::log(LOG, "[render] Executing render pass.");
-                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform)) {
+                    SRenderBox cropBox;
+                    getPhysicalCastingBox(&cropBox);
+                    
+                    Debug::log(LOG, "[render] Executing render pass with crop.");
+                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, &cropBox)) {
                         Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
                         sharingData.status = FRAME_NONE;
                         g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
@@ -595,8 +600,11 @@ void SSession::initCallbacks() {
             if (selection.needsTransform && g_pPortalManager->m_pRenderer) {
                 const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
                 if (PSTREAM && PSTREAM->currentPWBuffer && sharingData.compositor_gbm_bo) {
-                    Debug::log(LOG, "[render] Executing render pass.");
-                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform)) {
+                    SRenderBox cropBox;
+                    getPhysicalCastingBox(&cropBox);
+                    
+                    Debug::log(LOG, "[render] Executing render pass with crop.");
+                    if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, &cropBox)) {
                         Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
                         sharingData.status = FRAME_NONE;
                         g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
@@ -697,7 +705,7 @@ void SSession::initCallbacks() {
             const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
             if (!PSTREAM) {
-                // Stream doesn\'t exist yet, create it now that we have frame info.
+                // Stream doesn't exist yet, create it now that we have frame info.
                 Debug::log(LOG, "[screencopy] First frame info received, creating PipeWire stream now.");
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->createStream(this);
                 
@@ -838,13 +846,16 @@ void SSession::getLogicalDimensions(int& width, int& height) {
 }
 
 void SSession::getTargetDimensions(int& width, int& height) {
-    if (selection.needsTransform) {
-        // When we apply the transform, the target dimensions are the logical
-        // (e.g., vertical) dimensions of the monitor.
+    if (selection.type == TYPE_GEOMETRY && selection.needsTransform) {
+        // For a transformed region, the target dimensions are simply the
+        // logical width and height of the selection itself.
+        width = selection.w;
+        height = selection.h;
+    } else if (selection.needsTransform) {
+        // For a transformed full screen, get the full logical dimensions.
         getLogicalDimensions(width, height);
     } else {
-        // When we don't transform, we pass the native buffer as-is.
-        // The target dimensions are the native dimensions from the compositor.
+        // For non-transformed selections, use the native compositor dimensions.
         width = sharingData.frameInfoDMA.w;
         height = sharingData.frameInfoDMA.h;
     }
@@ -855,4 +866,71 @@ void CScreencopyPortal::appendToplevelExport(SP<CCHyprlandToplevelExportManagerV
     m_sState.toplevel = proto;
 
     Debug::log(LOG, "[screencopy] Registered for toplevel export");
+}
+
+void SSession::getPhysicalCastingBox(SRenderBox* pBox) {
+    if (selection.type != TYPE_GEOMETRY || !selection.needsTransform) {
+        pBox = nullptr;
+        return;
+    }
+
+    int physicalW = sharingData.frameInfoDMA.w;
+    int physicalH = sharingData.frameInfoDMA.h;
+
+    // These formulas are derived from the inverse of the transforms defined by wlroots
+    // See: https://github.com/swaywm/wlroots/blob/master/include/wlr/util/box.h#L131
+    switch (sharingData.transform) {
+        case WL_OUTPUT_TRANSFORM_NORMAL:
+            pBox->x = selection.x;
+            pBox->y = selection.y;
+            pBox->w = selection.w;
+            pBox->h = selection.h;
+            break;
+        case WL_OUTPUT_TRANSFORM_90:
+            pBox->x = selection.y;
+            pBox->y = physicalH - selection.x - selection.w; // Use physicalH
+            pBox->w = selection.h;
+            pBox->h = selection.w;
+            break;
+        case WL_OUTPUT_TRANSFORM_180:
+            pBox->x = physicalW - selection.x - selection.w;
+            pBox->y = physicalH - selection.y - selection.h;
+            pBox->w = selection.w;
+            pBox->h = selection.h;
+            break;
+        case WL_OUTPUT_TRANSFORM_270:
+            pBox->x = physicalW - selection.y - selection.h; // Use physicalW
+            pBox->y = selection.x;
+            pBox->w = selection.h;
+            pBox->h = selection.w;
+            break;
+        case WL_OUTPUT_TRANSFORM_FLIPPED:
+            pBox->x = physicalW - selection.x - selection.w;
+            pBox->y = selection.y;
+            pBox->w = selection.w;
+            pBox->h = selection.h;
+            break;
+        case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+            pBox->x = selection.y;
+            pBox->y = selection.x;
+            pBox->w = selection.h;
+            pBox->h = selection.w;
+            break;
+        case WL_OUTPUT_TRANSFORM_FLIPPED_180:
+            pBox->x = selection.x;
+            pBox->y = physicalH - selection.y - selection.h;
+            pBox->w = selection.w;
+            pBox->h = selection.h;
+            break;
+        case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+            pBox->x = physicalH - selection.y - selection.h;
+            pBox->y = physicalW - selection.x - selection.w;
+            pBox->w = selection.h;
+            pBox->h = selection.w;
+            break;
+        default:
+            pBox = nullptr; // Should not happen
+            break;
+    }
+    Debug::log(LOG, "[sc-diag] Calculated physical crop box: x={}, y={}, w={}, h={}", pBox->x, pBox->y, pBox->w, pBox->h);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../includes.hpp" // For SP/WP
+#include "../portals/ScreencopySession.hpp" // <-- ADD THIS INCLUDE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -24,7 +25,7 @@ public:
     CRenderer();
     ~CRenderer();
 
-    bool render(gbm_bo* RENDER_BO, gbm_bo* SOURCE_BO, wl_output_transform transform);
+    bool render(gbm_bo* RENDER_BO, gbm_bo* SOURCE_BO, wl_output_transform transform, const SRenderBox* pCrop = nullptr);
 
     EGLImageKHR m_pSourceEGLImage = EGL_NO_IMAGE_KHR;
     GLuint m_uSourceTex = 0;
