@@ -69,9 +69,9 @@ static void pwStreamStateChange(void* data, pw_stream_state old, pw_stream_state
 
     switch (state) {
         case PW_STREAM_STATE_PAUSED:
-            PSTREAM->streamState = false; // CRITICAL: Stop frame production when paused.
+            PSTREAM->streamState = false; // This now means "don't enqueue", not "stop capturing"
             PSTREAM->pSession->m_bStreamActive = false;
-            Debug::log(LOG, "[pw] Stream paused, halting frame capture.");
+            Debug::log(LOG, "[pw] Stream paused, halting frame enqueueing, but capture continues.");
             {
                 std::lock_guard lock(PSTREAM->pSession->start_reply_mutex);
                 PSTREAM->pSession->stream_ready = true;
@@ -522,8 +522,8 @@ CPipewireConnection::SPWStream* CPipewireConnection::streamFromSession(SSession*
 void CPipewireConnection::enqueue(SSession* pSession) {
     const auto PSTREAM = streamFromSession(pSession);
 
-    if (!PSTREAM) {
-        Debug::log(ERR, "[pw] Attempted enqueue on invalid session??");
+    if (!PSTREAM || !PSTREAM->currentPWBuffer) {
+        Debug::log(ERR, "[pipewire] enqueue called with no valid stream or buffer, dropping frame.");
         return;
     }
 

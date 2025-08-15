@@ -449,11 +449,21 @@ void SSession::initCallbacks() {
 
             Debug::log(TRACE, "[sc] frame timestamp sec: {} nsec: {} combined: {}ns", sharingData.tvSec, sharingData.tvNsec, sharingData.tvTimestampNs);
 
-            // v-- ADD THIS LOG --v
-            Debug::log(LOG, "[sc] Enqueuing frame to PipeWire.");
-            g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(this);
+            const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
-            if (g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this))
+            if (PSTREAM && PSTREAM->streamState) {
+                Debug::log(LOG, "[sc] Stream is active, enqueuing frame to PipeWire.");
+                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(this);
+            } else {
+                Debug::log(TRACE, "[sc] Stream is paused, dropping frame.");
+                // We must manually release the dequeued buffer if we don't use it.
+                if (PSTREAM && PSTREAM->currentPWBuffer) {
+                    pw_stream_queue_buffer(PSTREAM->stream, PSTREAM->currentPWBuffer->pwBuffer);
+                    PSTREAM->currentPWBuffer = nullptr;
+                }
+            }
+
+            if (PSTREAM)
                 g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
 
             sharingData.frameCallback.reset();
@@ -635,11 +645,21 @@ void SSession::initCallbacks() {
 
             Debug::log(TRACE, "[sc] frame timestamp sec: {} nsec: {} combined: {}ns", sharingData.tvSec, sharingData.tvNsec, sharingData.tvTimestampNs);
 
-            // v-- ADD THIS LOG --v
-            Debug::log(LOG, "[sc] Enqueuing frame to PipeWire.");
-            g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(this);
+            const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this);
 
-            if (g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(this))
+            if (PSTREAM && PSTREAM->streamState) {
+                Debug::log(LOG, "[sc] Stream is active, enqueuing frame to PipeWire.");
+                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(this);
+            } else {
+                Debug::log(TRACE, "[sc] Stream is paused, dropping frame.");
+                // We must manually release the dequeued buffer if we don't use it.
+                if (PSTREAM && PSTREAM->currentPWBuffer) {
+                    pw_stream_queue_buffer(PSTREAM->stream, PSTREAM->currentPWBuffer->pwBuffer);
+                    PSTREAM->currentPWBuffer = nullptr;
+                }
+            }
+
+            if (PSTREAM)
                 g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
 
             sharingData.windowFrameCallback.reset();
@@ -790,10 +810,7 @@ SSession::~SSession() {
 }
 
 void CScreencopyPortal::queueNextShareFrame(SSession* pSession) {
-    const auto PSTREAM = m_pPipewire->streamFromSession(pSession);
-
-    if (PSTREAM && !PSTREAM->streamState)
-        return;
+    
 
     // calculate frame delta and queue next frame
     const auto FRAMETOOKMS           = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - pSession->sharingData.begunFrame).count() / 1000.0;
