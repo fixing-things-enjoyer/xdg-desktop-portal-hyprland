@@ -16,6 +16,9 @@
 
 constexpr static int MAX_RETRIES = 10;
 
+void pushFirstFrame(SSession* pSession);
+void logTransformTime(const std::chrono::high_resolution_clock::time_point& start, const std::chrono::high_resolution_clock::time_point& end);
+
 //
 sdbus::Struct<std::string, uint32_t, sdbus::Variant> CScreencopyPortal::getFullRestoreStruct(const SSelectionData& data, uint32_t cursor) {
     std::unordered_map<std::string, sdbus::Variant> mapData;
@@ -222,6 +225,21 @@ dbUasv CScreencopyPortal::onSelectSources(sdbus::ObjectPath requestHandle, sdbus
 
     PSESSION->selection = SHAREDATA;
 
+    if (SHAREDATA.needsTransform) {
+        Debug::log(LOG, "[screencopy] Transform needed, ensuring renderer is initialized.");
+        if (!g_pPortalManager->m_pRenderer) {
+            if (g_pPortalManager->m_sWaylandConnection.gbmDevice) {
+                g_pPortalManager->m_pRenderer = std::make_unique<CRenderer>();
+                if (!g_pPortalManager->m_pRenderer->m_bGood) {
+                    Debug::log(WARN, "[core] Failed to initialize renderer. Transform will not work.");
+                    g_pPortalManager->m_pRenderer.reset();
+                }
+            } else {
+                Debug::log(WARN, "[core] No GBM device, cannot initialize renderer. Transform will not work.");
+            }
+        }
+    }
+
     return {SHAREDATA.type == TYPE_INVALID ? 1 : 0, {}};
 }
 
@@ -259,6 +277,10 @@ dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::Object
     }
     
     Debug::log(LOG, "[screencopy] onStart active wait complete, stream is ready.");
+
+    if (PSESSION->selection.needsTransform) {
+        pushFirstFrame(PSESSION);
+    }
     
     // Build the final reply and return it
     std::unordered_map<std::string, sdbus::Variant> options;
@@ -432,12 +454,15 @@ void SSession::initCallbacks() {
                         Debug::log(LOG, "[render] Executing render pass for full screen.");
                     }
 
+                    auto start = std::chrono::high_resolution_clock::now();
                     if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, pCrop)) {
                         Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
                         sharingData.status = FRAME_NONE;
                         g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
                         return;
                     }
+                    auto end = std::chrono::high_resolution_clock::now();
+                    logTransformTime(start, end);
                 }
             }
 
@@ -495,21 +520,6 @@ void SSession::initCallbacks() {
         });
         sharingData.frameCallback->setBufferDone([this](CCZwlrScreencopyFrameV1* r) {
             Debug::log(TRACE, "[sc] wlrOnBufferDone for {}", (void*)this);
-
-            // v-- ADD THIS BLOCK --v
-            // Initialize renderer if it doesn't exist
-            if (!g_pPortalManager->m_pRenderer) {
-                if (g_pPortalManager->m_sWaylandConnection.gbmDevice) {
-                    g_pPortalManager->m_pRenderer = std::make_unique<CRenderer>();
-                    if (!g_pPortalManager->m_pRenderer->m_bGood) {
-                        Debug::log(WARN, "[core] Failed to initialize renderer. Transform will not work.");
-                        g_pPortalManager->m_pRenderer.reset();
-                    }
-                } else {
-                    Debug::log(WARN, "[core] No GBM device, cannot initialize renderer. Transform will not work.");
-                }
-            }
-            // ^-- ADD THIS BLOCK --^
 
             if (selection.needsTransform && !sharingData.compositor_gbm_bo) {
                 // Use the compositor's reported native dimensions directly
@@ -628,12 +638,15 @@ void SSession::initCallbacks() {
                         Debug::log(LOG, "[render] Executing render pass for full screen.");
                     }
 
+                    auto start = std::chrono::high_resolution_clock::now();
                     if (!g_pPortalManager->m_pRenderer->render(PSTREAM->currentPWBuffer->bo, sharingData.compositor_gbm_bo, sharingData.transform, pCrop)) {
                         Debug::log(ERR, "[screencopy] Render failed, skipping frame enqueue.");
                         sharingData.status = FRAME_NONE;
                         g_pPortalManager->addTimer({100.0, [this]() { g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this); }});
                         return;
                     }
+                    auto end = std::chrono::high_resolution_clock::now();
+                    logTransformTime(start, end);
                 }
             }
 
@@ -691,21 +704,6 @@ void SSession::initCallbacks() {
         });
         sharingData.windowFrameCallback->setBufferDone([this](CCHyprlandToplevelExportFrameV1* r) {
             Debug::log(TRACE, "[sc] hlOnBufferDone for {}", (void*)this);
-
-            // v-- ADD THIS BLOCK --v
-            // Initialize renderer if it doesn't exist
-            if (!g_pPortalManager->m_pRenderer) {
-                if (g_pPortalManager->m_sWaylandConnection.gbmDevice) {
-                    g_pPortalManager->m_pRenderer = std::make_unique<CRenderer>();
-                    if (!g_pPortalManager->m_pRenderer->m_bGood) {
-                        Debug::log(WARN, "[core] Failed to initialize renderer. Transform will not work.");
-                        g_pPortalManager->m_pRenderer.reset();
-                    }
-                } else {
-                    Debug::log(WARN, "[core] No GBM device, cannot initialize renderer. Transform will not work.");
-                }
-            }
-            // ^-- ADD THIS BLOCK --^
 
             if (selection.needsTransform && !sharingData.compositor_gbm_bo) {
                 // Use the compositor's reported native dimensions directly

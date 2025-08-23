@@ -1,6 +1,11 @@
+#include "../portals/Screencopy.hpp"
 #include "Renderer.hpp"
 #include "../core/PortalManager.hpp"
 #include "../helpers/Log.hpp"
+#include "../pipewire/PipewireConnection.hpp"
+#include <sys/mman.h>
+#include <unistd.h>
+#include <gbm.h>
 
 #include <stdlib.h> // For malloc/free
 #include <cmath> // For sin and cos
@@ -495,4 +500,57 @@ CRenderer::~CRenderer() {
         }
         eglTerminate(m_pEGLDisplay);
     }
+}
+
+void clearBuffer(gbm_bo* bo) {
+    if (!bo) {
+        Debug::log(WARN, "[render] clearBuffer: called with null bo");
+        return;
+    }
+
+    uint32_t stride = 0;
+    void* map_data = nullptr;
+    void* mapped = gbm_bo_map(bo, 0, 0, gbm_bo_get_width(bo), gbm_bo_get_height(bo), GBM_BO_TRANSFER_WRITE, &stride, &map_data);
+
+    if (mapped) {
+        Debug::log(TRACE, "[render] Clearing buffer of size {}x{} with stride {}", gbm_bo_get_width(bo), gbm_bo_get_height(bo), stride);
+        memset(mapped, 0, stride * gbm_bo_get_height(bo));
+        gbm_bo_unmap(bo, map_data);
+    } else {
+        Debug::log(ERR, "[render] Could not map gbm_bo to clear it to black. A green screen might appear briefly.");
+    }
+}
+
+void pushFirstFrame(SSession* pSession) {
+    if (!pSession || !pSession->selection.needsTransform) {
+        return;
+    }
+
+    const auto PSTREAM = g_pPortalManager->m_sPortals.screencopy->m_pPipewire->streamFromSession(pSession);
+    if (!PSTREAM || !PSTREAM->streamState) {
+        Debug::log(WARN, "[render] pushFirstFrame: No active stream found for session, cannot push initial frame.");
+        return;
+    }
+
+    Debug::log(LOG, "[render] Pushing an initial black frame to satisfy client timeout.");
+
+    // Dequeue a buffer from PipeWire
+    g_pPortalManager->m_sPortals.screencopy->m_pPipewire->dequeue(pSession);
+    if (!PSTREAM->currentPWBuffer) {
+        Debug::log(ERR, "[render] pushFirstFrame: Failed to dequeue a PipeWire buffer.");
+        return;
+    }
+
+    // Clear the buffer to black
+    clearBuffer(PSTREAM->currentPWBuffer->bo);
+
+    // Enqueue the cleared buffer. We need to set a timestamp.
+    pSession->sharingData.tvTimestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    g_pPortalManager->m_sPortals.screencopy->m_pPipewire->enqueue(pSession);
+
+    Debug::log(LOG, "[render] Initial black frame pushed.");
+}
+
+void logTransformTime(const std::chrono::high_resolution_clock::time_point& start, const std::chrono::high_resolution_clock::time_point& end) {
+    Debug::log(INFO, "[render] Transform time: {}ms", std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
 }
