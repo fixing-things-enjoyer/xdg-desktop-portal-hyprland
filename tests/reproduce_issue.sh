@@ -90,7 +90,7 @@ start_portal() {
     
     mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
     cat > "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/xdph.conf" <<EOF
-screencopy:custom_picker_binary = ${SCRIPT_DIR}/auto_picker.sh
+screencopy:custom_picker_binary = ${SCRIPT_DIR}/mock_picker.sh
 screencopy:allow_gpu_rotation = true
 EOF
     

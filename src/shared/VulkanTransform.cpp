@@ -665,7 +665,7 @@ CVulkanTransform::SRotationResult CVulkanTransform::rotateBuffer(gbm_bo* inputBo
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_pState->computePipeline);
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_pState->pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, m_pState->pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t), &rotationMode);
-    vkCmdDispatch(cmdBuffer, (outW + 15) / 16, (outH + 15) / 16, 1);
+    vkCmdDispatch(cmdBuffer, (width + 15) / 16, (height + 15) / 16, 1);
 
     VkImageMemoryBarrier outputBarrier{};
     outputBarrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
