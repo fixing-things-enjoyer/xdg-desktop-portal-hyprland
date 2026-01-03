@@ -89,6 +89,8 @@ SSelectionData promptForScreencopySelection() {
     for (auto& flag : FLAGS) {
         if (flag == 'r')
             data.allowToken = true;
+        else if (flag == 'g')
+            data.gpuRotation = true;
         else
             Debug::log(LOG, "[screencopy] unknown flag from share-picker: {}", flag);
     }

@@ -1,1 +1,2 @@
 option('systemd', type: 'feature', value: 'auto', description: 'Install systemd user service unit')
+option('gpu_screen_rotation', type: 'feature', value: 'auto', description: 'Enable GPU-accelerated screen rotation for rotated monitors (requires Vulkan)')

@@ -1,0 +1,39 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform readonly image2D inputImage;
+layout(binding = 1, rgba8) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform PushConstants {
+    int rotationMode;
+} pc;
+
+void main() {
+    ivec2 coords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 inputDims = imageSize(inputImage);
+    
+    if (coords.x >= inputDims.x || coords.y >= inputDims.y)
+        return;
+    
+    ivec2 targetCoords;
+    
+    if (pc.rotationMode == 1) {
+        targetCoords.x = coords.y;
+        targetCoords.y = inputDims.x - 1 - coords.x;
+    }
+    else if (pc.rotationMode == 2) {
+        targetCoords.x = inputDims.x - 1 - coords.x;
+        targetCoords.y = inputDims.y - 1 - coords.y;
+    }
+    else if (pc.rotationMode == 3) {
+        targetCoords.x = inputDims.y - 1 - coords.y;
+        targetCoords.y = coords.x;
+    }
+    else {
+        targetCoords = coords;
+    }
+    
+    vec4 pixel = imageLoad(inputImage, coords);
+    imageStore(outputImage, targetCoords, pixel);
+}

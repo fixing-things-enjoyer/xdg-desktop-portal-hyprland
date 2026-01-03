@@ -2,15 +2,15 @@
 #include "../core/PortalManager.hpp"
 #include "../helpers/Log.hpp"
 #include "../helpers/MiscFunctions.hpp"
+#include "../shared/VulkanTransform.hpp"
 
 #include <libdrm/drm_fourcc.h>
 #include <pipewire/pipewire.h>
 #include "linux-dmabuf-v1.hpp"
 #include <unistd.h>
 
-constexpr static int MAX_RETRIES = 10;
+constexpr static int                                        MAX_RETRIES = 10;
 
-//
 static sdbus::Struct<std::string, uint32_t, sdbus::Variant> getFullRestoreStruct(const SSelectionData& data, uint32_t cursor) {
     std::unordered_map<std::string, sdbus::Variant> mapData;
 
@@ -44,7 +44,6 @@ dbUasv CScreencopyPortal::onCreateSession(sdbus::ObjectPath requestHandle, sdbus
     const Hyprutils::Memory::CWeakPointer<SSession> PSESSION = m_vSessions.emplace_back(Hyprutils::Memory::makeUnique<SSession>(appID, requestHandle, sessionHandle));
     PSESSION->self                                           = PSESSION;
 
-    // create objects
     PSESSION->session            = createDBusSession(sessionHandle);
     PSESSION->session->onDestroy = [PSESSION, this]() {
         if (PSESSION->sharingData.active) {
@@ -54,7 +53,6 @@ dbUasv CScreencopyPortal::onCreateSession(sdbus::ObjectPath requestHandle, sdbus
         PSESSION->session.release();
         Debug::log(LOG, "[screencopy] Session destroyed");
 
-        // deactivate toplevel so it doesn't listen and waste battery
         g_pPortalManager->m_sHelpers.toplevel->deactivate();
     };
     PSESSION->request            = createDBusRequest(requestHandle);
@@ -93,9 +91,6 @@ dbUasv CScreencopyPortal::onSelectSources(sdbus::ObjectPath requestHandle, sdbus
             PSESSION->cursorMode = val.get<uint32_t>();
             Debug::log(LOG, "[screencopy] option cursor_mode to {}", PSESSION->cursorMode);
         } else if (key == "restore_data") {
-            // suv
-            // v -> r(susbt) -> v2
-            // v -> a(sv) -> v3
             std::string issuer;
             uint32_t    version;
             auto        suv = val.get<sdbus::Struct<std::string, uint32_t, sdbus::Variant>>();
@@ -130,7 +125,6 @@ dbUasv CScreencopyPortal::onSelectSources(sdbus::ObjectPath requestHandle, sdbus
                 Debug::log(LOG, "[screencopy] Restore token v2 {} with data: {} {} {} {}", restoreData.token, restoreData.windowHandle, restoreData.output, restoreData.withCursor,
                            restoreData.timeIssued);
             } else {
-                // ver 3
                 auto sv = data.get<std::unordered_map<std::string, sdbus::Variant>>();
 
                 restoreData.exists = true;
@@ -183,7 +177,7 @@ dbUasv CScreencopyPortal::onSelectSources(sdbus::ObjectPath requestHandle, sdbus
         SHAREDATA.type         = WINDOW ? TYPE_WINDOW : TYPE_OUTPUT;
         SHAREDATA.windowHandle = WINDOW ? (HANDLEMATCH ? HANDLEMATCH->handle : g_pPortalManager->m_sHelpers.toplevel->handleFromClass(restoreData.windowClass)->handle) : nullptr;
         SHAREDATA.windowClass  = restoreData.windowClass;
-        SHAREDATA.allowToken   = true; // user allowed token before
+        SHAREDATA.allowToken   = true;
         PSESSION->cursorMode   = restoreData.withCursor ? EMBEDDED : HIDDEN;
     } else {
         Debug::log(LOG, "[screencopy] restore data invalid / missing, prompting");
@@ -235,7 +229,6 @@ dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::Object
     std::unordered_map<std::string, sdbus::Variant> options;
 
     if (PSESSION->selection.allowToken) {
-        // give them a token :)
         options["restore_data"] = sdbus::Variant{getFullRestoreStruct(PSESSION->selection, PSESSION->cursorMode)};
         options["persist_mode"] = sdbus::Variant{uint32_t{2}};
 
@@ -268,13 +261,37 @@ dbUasv CScreencopyPortal::onStart(sdbus::ObjectPath requestHandle, sdbus::Object
 void CScreencopyPortal::startSharing(CScreencopyPortal::SSession* pSession) {
     pSession->sharingData.active = true;
 
+    if (pSession->selection.type == TYPE_OUTPUT || pSession->selection.type == TYPE_GEOMETRY) {
+        const auto POUTPUT = g_pPortalManager->getOutputFromName(pSession->selection.output);
+        if (POUTPUT) {
+            pSession->sharingData.transform = POUTPUT->transform;
+        }
+    }
+
+    static auto* const* PGPUROTATION     = (Hyprlang::INT* const*)g_pPortalManager->m_sConfig.config->getConfigValuePtr("screencopy:allow_gpu_rotation")->getDataStaticPtr();
+    bool                wantsGpuRotation = **PGPUROTATION || pSession->selection.gpuRotation;
+
+    bool                needsRot = CVulkanTransform::needsRotation(pSession->sharingData.transform);
+    bool                vkInit   = false;
+    bool                vkGood   = false;
+
+    if (wantsGpuRotation && needsRot) {
+        vkInit = g_VulkanTransform.init();
+        vkGood = g_VulkanTransform.good();
+    }
+
+    pSession->sharingData.gpuRotationEnabled = wantsGpuRotation && needsRot && vkInit && vkGood;
+
+    if (pSession->sharingData.gpuRotationEnabled)
+        Debug::log(LOG, "[screencopy] GPU rotation enabled for session");
+
     startFrameCopy(pSession);
 
     wl_display_dispatch(g_pPortalManager->m_sWaylandConnection.display);
     wl_display_roundtrip(g_pPortalManager->m_sWaylandConnection.display);
 
     if (pSession->sharingData.frameInfoDMA.fmt == DRM_FORMAT_INVALID) {
-        Debug::log(ERR, "[screencopy] Couldn't obtain a format from dma"); // todo: blocks shm
+        Debug::log(ERR, "[screencopy] Couldn't obtain a format from dma");
         return;
     }
 
@@ -346,6 +363,67 @@ void CScreencopyPortal::SSession::startCopy() {
     initCallbacks();
 }
 
+static std::unique_ptr<SBuffer> createIntermediateBuffer(CScreencopyPortal::SSession* pSession) {
+    auto pBuffer      = std::make_unique<SBuffer>();
+    pBuffer->isDMABUF = true;
+    pBuffer->w        = pSession->sharingData.frameInfoDMA.w;
+    pBuffer->h        = pSession->sharingData.frameInfoDMA.h;
+    pBuffer->fmt      = pSession->sharingData.frameInfoDMA.fmt;
+
+    uint32_t flags = GBM_BO_USE_RENDERING;
+
+    pBuffer->bo = gbm_bo_create(g_pPortalManager->m_sWaylandConnection.gbmDevice, pBuffer->w, pBuffer->h, pBuffer->fmt, flags);
+
+    if (!pBuffer->bo) {
+        Debug::log(ERR, "[sc] Couldn't create a drm buffer for intermediate copy");
+        return nullptr;
+    }
+
+    pBuffer->planeCount = gbm_bo_get_plane_count(pBuffer->bo);
+
+    auto params = makeShared<CCZwpLinuxBufferParamsV1>(g_pPortalManager->m_sWaylandConnection.linuxDmabuf->sendCreateParams());
+    if (!params) {
+        Debug::log(ERR, "[sc] zwp_linux_dmabuf_v1_create_params failed");
+        gbm_bo_destroy(pBuffer->bo);
+        return nullptr;
+    }
+
+    for (size_t plane = 0; plane < (size_t)pBuffer->planeCount; plane++) {
+        pBuffer->size[plane]   = 0;
+        pBuffer->stride[plane] = gbm_bo_get_stride_for_plane(pBuffer->bo, plane);
+        pBuffer->offset[plane] = gbm_bo_get_offset(pBuffer->bo, plane);
+        uint64_t mod           = gbm_bo_get_modifier(pBuffer->bo);
+        pBuffer->fd[plane]     = gbm_bo_get_fd_for_plane(pBuffer->bo, plane);
+
+        if (pBuffer->fd[plane] < 0) {
+            Debug::log(ERR, "[sc] gbm_bo_get_fd_for_plane failed");
+            params.reset();
+            gbm_bo_destroy(pBuffer->bo);
+            for (size_t plane_tmp = 0; plane_tmp < plane; plane_tmp++) {
+                close(pBuffer->fd[plane_tmp]);
+            }
+            return NULL;
+        }
+
+        params->sendAdd(pBuffer->fd[plane], plane, pBuffer->offset[plane], pBuffer->stride[plane], mod >> 32, mod & 0xffffffff);
+    }
+
+    pBuffer->wlBuffer = makeShared<CCWlBuffer>(params->sendCreateImmed(pBuffer->w, pBuffer->h, pBuffer->fmt, (zwpLinuxBufferParamsV1Flags)0));
+    params.reset();
+
+    if (!pBuffer->wlBuffer) {
+        Debug::log(ERR, "[sc] zwp_linux_buffer_params_v1_create_immed failed");
+        gbm_bo_destroy(pBuffer->bo);
+        for (size_t plane = 0; plane < (size_t)pBuffer->planeCount; plane++) {
+            close(pBuffer->fd[plane]);
+        }
+
+        return nullptr;
+    }
+
+    return pBuffer;
+}
+
 void CScreencopyPortal::SSession::initCallbacks() {
     if (sharingData.frameCallback) {
         sharingData.frameCallback->setBuffer([this, self = self](CCZwlrScreencopyFrameV1* r, uint32_t format, uint32_t width, uint32_t height, uint32_t stride) {
@@ -358,8 +436,6 @@ void CScreencopyPortal::SSession::initCallbacks() {
             sharingData.frameInfoSHM.fmt    = drmFourccFromSHM((wl_shm_format)format);
             sharingData.frameInfoSHM.size   = stride * height;
             sharingData.frameInfoSHM.stride = stride;
-
-            // todo: done if ver < 3
         });
         sharingData.frameCallback->setReady([this, self = self](CCZwlrScreencopyFrameV1* r, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec) {
             Debug::log(TRACE, "[sc] wlrOnReady for {}", (void*)self.get());
@@ -431,21 +507,32 @@ void CScreencopyPortal::SSession::initCallbacks() {
             const auto FMT = PSTREAM->isDMA ? sharingData.frameInfoDMA.fmt : sharingData.frameInfoSHM.fmt;
             if ((PSTREAM->pwVideoInfo.format != pwFromDrmFourcc(FMT) && PSTREAM->pwVideoInfo.format != pwStripAlpha(pwFromDrmFourcc(FMT))) ||
                 (PSTREAM->pwVideoInfo.size.width != sharingData.frameInfoDMA.w || PSTREAM->pwVideoInfo.size.height != sharingData.frameInfoDMA.h)) {
-                Debug::log(LOG, "[sc] Incompatible formats, renegotiate stream");
-                sharingData.status = FRAME_RENEG;
-                g_pPortalManager->m_sPortals.screencopy->m_pPipewire->updateStreamParam(PSTREAM);
-                g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
-                sharingData.status = FRAME_NONE;
-                sharingData.frameCallback.reset();
-                return;
+
+                bool dimensionMismatch = PSTREAM->pwVideoInfo.size.width != sharingData.frameInfoDMA.w || PSTREAM->pwVideoInfo.size.height != sharingData.frameInfoDMA.h;
+                if (sharingData.gpuRotationEnabled) {
+                    uint32_t rotatedW, rotatedH;
+                    CVulkanTransform::getRotatedDimensions(sharingData.frameInfoDMA.w, sharingData.frameInfoDMA.h, sharingData.transform, rotatedW, rotatedH);
+                    if (PSTREAM->pwVideoInfo.size.width == rotatedW && PSTREAM->pwVideoInfo.size.height == rotatedH)
+                        dimensionMismatch = false;
+                }
+
+                if (dimensionMismatch) {
+                    Debug::log(LOG, "[sc] Incompatible formats, renegotiate stream");
+                    sharingData.status = FRAME_RENEG;
+                    g_pPortalManager->m_sPortals.screencopy->m_pPipewire->updateStreamParam(PSTREAM);
+                    g_pPortalManager->m_sPortals.screencopy->queueNextShareFrame(this);
+                    sharingData.status = FRAME_NONE;
+                    sharingData.frameCallback.reset();
+                    return;
+                }
             }
 
-            if (!PSTREAM->currentPWBuffer) {
+            if (!PSTREAM->currentPWBuffer && !sharingData.gpuRotationEnabled) {
                 Debug::log(TRACE, "[sc] wlrOnBufferDone: dequeue, no current buffer");
                 g_pPortalManager->m_sPortals.screencopy->m_pPipewire->dequeue(this);
             }
 
-            if (!PSTREAM->currentPWBuffer) {
+            if (!PSTREAM->currentPWBuffer && !sharingData.gpuRotationEnabled) {
                 Debug::log(LOG, "[screencopy/pipewire] Out of buffers");
                 sharingData.status = FRAME_NONE;
                 if (sharingData.copyRetries++ < MAX_RETRIES) {
@@ -457,8 +544,27 @@ void CScreencopyPortal::SSession::initCallbacks() {
                 return;
             }
 
-            sharingData.frameCallback->sendCopyWithDamage(PSTREAM->currentPWBuffer->wlBuffer->resource());
-            sharingData.copyRetries = 0;
+            wl_proxy* bufferResource = nullptr;
+
+            if (sharingData.gpuRotationEnabled) {
+                if (!sharingData.intermediateBuffer || sharingData.intermediateBuffer->w != sharingData.frameInfoDMA.w ||
+                    sharingData.intermediateBuffer->h != sharingData.frameInfoDMA.h || sharingData.intermediateBuffer->fmt != sharingData.frameInfoDMA.fmt) {
+                    sharingData.intermediateBuffer = createIntermediateBuffer(this);
+                }
+
+                if (sharingData.intermediateBuffer && sharingData.intermediateBuffer->wlBuffer)
+                    bufferResource = (wl_proxy*)sharingData.intermediateBuffer->wlBuffer->resource();
+                else
+                    Debug::log(ERR, "[sc] Failed to create intermediate buffer for rotation");
+            } else
+                bufferResource = (wl_proxy*)PSTREAM->currentPWBuffer->wlBuffer->resource();
+
+            if (bufferResource) {
+                sharingData.frameCallback->sendCopyWithDamage(bufferResource);
+                sharingData.copyRetries = 0;
+            } else {
+                Debug::log(ERR, "[sc] No buffer resource to copy to");
+            }
 
             Debug::log(TRACE, "[sc] wlr frame copied");
         });
@@ -473,8 +579,6 @@ void CScreencopyPortal::SSession::initCallbacks() {
             sharingData.frameInfoSHM.fmt    = drmFourccFromSHM((wl_shm_format)format);
             sharingData.frameInfoSHM.size   = stride * height;
             sharingData.frameInfoSHM.stride = stride;
-
-            // todo: done if ver < 3
         });
         sharingData.windowFrameCallback->setReady([this, self = self](CCHyprlandToplevelExportFrameV1* r, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec) {
             Debug::log(TRACE, "[sc] hlOnReady for {}", (void*)self.get());
@@ -594,8 +698,7 @@ void CScreencopyPortal::queueNextShareFrame(CScreencopyPortal::SSession* pSessio
     Debug::log(TRACE, "[screencopy] set fps {}, frame took {:.2f}ms, ms till next refresh {:.2f}, estimated actual fps: {:.2f}", pSession->sharingData.framerate, FRAMETOOKMS,
                MSTILNEXTREFRESH, std::clamp(1000.0 / FRAMETOOKMS, 1.0, (double)pSession->sharingData.framerate));
 
-    g_pPortalManager->addTimer(
-        {std::clamp(MSTILNEXTREFRESH - 1.0 /* safezone */, 6.0, 1000.0), [pSession]() { g_pPortalManager->m_sPortals.screencopy->startFrameCopy(pSession); }});
+    g_pPortalManager->addTimer({std::clamp(MSTILNEXTREFRESH - 1.0, 6.0, 1000.0), [pSession]() { g_pPortalManager->m_sPortals.screencopy->startFrameCopy(pSession); }});
 }
 bool CScreencopyPortal::hasToplevelCapabilities() {
     return m_sState.toplevel;
@@ -771,10 +874,7 @@ static void pwStreamParamChanged(void* data, uint32_t id, const spa_pod* param) 
             Debug::log(TRACE, "[pw] unable to allocate a dmabuf with modifiers. Falling back to the old api");
             for (uint32_t i = 0; i < n_modifiers; i++) {
                 switch (modifiers[i]) {
-                    case DRM_FORMAT_MOD_INVALID:
-                        flags =
-                            GBM_BO_USE_RENDERING; // ;cast->ctx->state->config->screencast_conf.force_mod_linear ? GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR : GBM_BO_USE_RENDERING;
-                        break;
+                    case DRM_FORMAT_MOD_INVALID: flags = GBM_BO_USE_RENDERING; break;
                     case DRM_FORMAT_MOD_LINEAR: flags = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR; break;
                     default: continue;
                 }
@@ -875,10 +975,8 @@ static void pwStreamAddBuffer(void* data, pw_buffer* buffer) {
         spaData[plane].flags         = 0;
         spaData[plane].fd            = PBUFFER->fd[plane];
         spaData[plane].data          = NULL;
-        // clients have implemented to check chunk->size if the buffer is valid instead
-        // of using the flags. Until they are patched we should use some arbitrary value.
         if (PBUFFER->isDMABUF && spaData[plane].chunk->size == 0) {
-            spaData[plane].chunk->size = 9; // This was choosen by a fair d20.
+            spaData[plane].chunk->size = 9;
         }
     }
 }
@@ -961,7 +1059,6 @@ void CPipewireConnection::createStream(CScreencopyPortal::SSession* pSession) {
 }
 
 void CPipewireConnection::destroyStream(CScreencopyPortal::SSession* pSession) {
-    // Disconnecting the stream can cause reentrance to this function.
     if (pSession->sharingData.active == false)
         return;
     pSession->sharingData.active = false;
@@ -1042,22 +1139,30 @@ uint32_t CPipewireConnection::buildFormatsFor(spa_pod_builder* b[2], const spa_p
     uint32_t  modCount   = 0;
     uint64_t* modifiers  = nullptr;
 
+    uint32_t  dmaW = stream->pSession->sharingData.frameInfoDMA.w;
+    uint32_t  dmaH = stream->pSession->sharingData.frameInfoDMA.h;
+    uint32_t  shmW = stream->pSession->sharingData.frameInfoSHM.w;
+    uint32_t  shmH = stream->pSession->sharingData.frameInfoSHM.h;
+
+    if (stream->pSession->sharingData.gpuRotationEnabled) {
+        CVulkanTransform::getRotatedDimensions(dmaW, dmaH, stream->pSession->sharingData.transform, dmaW, dmaH);
+        CVulkanTransform::getRotatedDimensions(shmW, shmH, stream->pSession->sharingData.transform, shmW, shmH);
+        Debug::log(LOG, "[pw] GPU rotation active, using rotated dimensions: {}x{}", dmaW, dmaH);
+    }
+
     if (build_modifierlist(stream, stream->pSession->sharingData.frameInfoDMA.fmt, &modifiers, &modCount) && modCount > 0) {
         Debug::log(LOG, "[pw] Building modifiers for dma");
 
         paramCount = 2;
-        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoDMA.fmt), stream->pSession->sharingData.frameInfoDMA.w,
-                                  stream->pSession->sharingData.frameInfoDMA.h, stream->pSession->sharingData.framerate, modifiers, modCount);
+        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoDMA.fmt), dmaW, dmaH, stream->pSession->sharingData.framerate, modifiers, modCount);
         assert(params[0] != NULL);
-        params[1] = build_format(b[1], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), stream->pSession->sharingData.frameInfoSHM.w,
-                                 stream->pSession->sharingData.frameInfoSHM.h, stream->pSession->sharingData.framerate, NULL, 0);
+        params[1] = build_format(b[1], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), shmW, shmH, stream->pSession->sharingData.framerate, NULL, 0);
         assert(params[1] != NULL);
     } else {
         Debug::log(LOG, "[pw] Building modifiers for shm");
 
         paramCount = 1;
-        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), stream->pSession->sharingData.frameInfoSHM.w,
-                                  stream->pSession->sharingData.frameInfoSHM.h, stream->pSession->sharingData.framerate, NULL, 0);
+        params[0]  = build_format(b[0], pwFromDrmFourcc(stream->pSession->sharingData.frameInfoSHM.fmt), shmW, shmH, stream->pSession->sharingData.framerate, NULL, 0);
     }
 
     if (modifiers)
@@ -1098,6 +1203,26 @@ void CPipewireConnection::enqueue(CScreencopyPortal::SSession* pSession) {
     if (CORRUPT)
         Debug::log(TRACE, "[pw] buffer corrupt");
 
+    if (!CORRUPT && pSession->sharingData.gpuRotationEnabled && pSession->sharingData.intermediateBuffer) {
+        Debug::log(TRACE, "[pw] Doing rotation");
+        auto result = g_VulkanTransform.rotateBuffer(pSession->sharingData.intermediateBuffer->bo, pSession->sharingData.intermediateBuffer->w,
+                                                     pSession->sharingData.intermediateBuffer->h, pSession->sharingData.intermediateBuffer->fmt, pSession->sharingData.transform);
+
+        if (result.success) {
+            Debug::log(TRACE, "[pw] Rotation success, swapping buffer fd");
+            pSession->sharingData.gpuRotationApplied = true;
+
+            spa_data* datas = spaBuf->datas;
+
+            datas[0].fd            = result.outFd;
+            datas[0].chunk->stride = gbm_bo_get_stride(result.outputBo);
+            datas[0].chunk->size   = datas[0].chunk->stride * result.outHeight;
+
+        } else {
+            Debug::log(ERR, "[pw] Rotation failed");
+        }
+    }
+
     Debug::log(TRACE, "[pw] Enqueue data:");
 
     spa_meta_header* header = (spa_meta_header*)spa_buffer_find_meta_data(spaBuf, SPA_META_Header, sizeof(*header));
@@ -1112,7 +1237,10 @@ void CPipewireConnection::enqueue(CScreencopyPortal::SSession* pSession) {
 
     spa_meta_videotransform* vt = (spa_meta_videotransform*)spa_buffer_find_meta_data(spaBuf, SPA_META_VideoTransform, sizeof(*vt));
     if (vt) {
-        vt->transform = pSession->sharingData.transform;
+        if (pSession->sharingData.gpuRotationApplied)
+            vt->transform = WL_OUTPUT_TRANSFORM_NORMAL;
+        else
+            vt->transform = pSession->sharingData.transform;
         Debug::log(TRACE, "[pw]  | meta transform {}", vt->transform);
     }
 
@@ -1138,7 +1266,6 @@ void CPipewireConnection::enqueue(CScreencopyPortal::SSession* pSession) {
         } while (spa_meta_check(damageRegion + 1, damage) && damageRegion++);
 
         if (damageCounter < pSession->sharingData.damageCount) {
-            // TODO: merge damage properly
             *damageRegion = SPA_REGION(0, 0, pSession->sharingData.frameInfoDMA.w, pSession->sharingData.frameInfoDMA.h);
             Debug::log(TRACE, "[pw]  | damage overflow, damaged whole");
         }

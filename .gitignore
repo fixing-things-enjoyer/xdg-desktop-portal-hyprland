@@ -69,3 +69,10 @@ result-man
 
 # MISCELLANEOUS
 .cache
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+tests/.venv/
+tests/output/
