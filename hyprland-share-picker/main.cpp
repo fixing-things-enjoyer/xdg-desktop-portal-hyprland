@@ -63,7 +63,7 @@ std::vector<SWindowEntry> getWindows(const char* env) {
 
         // window address
         const auto WINDOWSEPPOS = rolling.find("[HA>]");
-        const auto WINDOWADDR = rolling.substr(TITLESEPPOS + 5, WINDOWSEPPOS - 5 - TITLESEPPOS);
+        const auto WINDOWADDR   = rolling.substr(TITLESEPPOS + 5, WINDOWSEPPOS - 5 - TITLESEPPOS);
 
         try {
             result.push_back({TITLESTR, CLASSSTR, std::stoull(IDSTR)});
@@ -100,8 +100,9 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setApplicationName("org.hyprland.xdg-desktop-portal-hyprland");
 
     // get the tabwidget
-    const auto TABWIDGET        = w.findChild<QTabWidget*>("tabWidget");
-    const auto ALLOWTOKENBUTTON = w.findChild<QCheckBox*>("checkBox");
+    const auto TABWIDGET         = w.findChild<QTabWidget*>("tabWidget");
+    const auto ALLOWTOKENBUTTON  = w.findChild<QCheckBox*>("checkBox");
+    const auto FIXROTATIONBUTTON = w.findChild<QCheckBox*>("checkBoxFixRotation");
 
     if (allowTokenByDefault)
         ALLOWTOKENBUTTON->setCheckState(Qt::CheckState::Checked);
@@ -132,6 +133,7 @@ int main(int argc, char* argv[]) {
         QObject::connect(button, &QPushButton::clicked, [=]() {
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (FIXROTATIONBUTTON->isChecked() ? "g" : "");
             std::cout << "/";
 
             std::cout << "screen:" << outputName.toStdString() << "\n";
@@ -168,6 +170,7 @@ int main(int argc, char* argv[]) {
         QObject::connect(button, &QPushButton::clicked, [=]() {
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (FIXROTATIONBUTTON->isChecked() ? "g" : "");
             std::cout << "/";
 
             std::cout << "window:" << mainPickerPtr->windowIDs[button] << "\n";
@@ -235,6 +238,7 @@ int main(int argc, char* argv[]) {
 
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (FIXROTATIONBUTTON->isChecked() ? "g" : "");
             std::cout << "/";
 
             std::cout << "region:" << SCREEN_NAME << "@" << X - pScreen->geometry().x() << "," << Y - pScreen->geometry().y() << "," << W << "," << H << "\n";

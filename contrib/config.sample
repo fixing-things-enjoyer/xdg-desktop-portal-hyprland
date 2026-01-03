@@ -3,3 +3,12 @@ output_name=
 max_fps=30
 chooser_cmd=slurp -f %o -or
 chooser_type=simple
+
+[screencopy]
+max_fps=120
+allow_token_by_default=false
+custom_picker_binary=
+# Enable GPU-accelerated rotation for rotated monitors (requires Vulkan)
+# When enabled, frames are rotated on the GPU before being sent to PipeWire
+# This fixes skewed/black output when screen sharing on rotated monitors
+allow_gpu_rotation=false

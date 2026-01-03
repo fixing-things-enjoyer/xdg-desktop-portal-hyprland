@@ -253,23 +253,40 @@
         </widget>
        </widget>
       </item>
-      <item>
-       <widget class="QCheckBox" name="checkBox">
-        <property name="focusPolicy">
-         <enum>Qt::ClickFocus</enum>
-        </property>
-        <property name="toolTip">
-         <string>By selecting this, the application will be given a restore token that it can use to skip prompting you next time. 
+       <item>
+        <widget class="QCheckBox" name="checkBox">
+         <property name="focusPolicy">
+          <enum>Qt::ClickFocus</enum>
+         </property>
+         <property name="toolTip">
+          <string>By selecting this, the application will be given a restore token that it can use to skip prompting you next time. 
 Only select if you trust the application.</string>
-        </property>
-        <property name="layoutDirection">
-         <enum>Qt::LeftToRight</enum>
-        </property>
-        <property name="text">
-         <string>Allow a restore token</string>
-        </property>
-       </widget>
-      </item>
+         </property>
+         <property name="layoutDirection">
+          <enum>Qt::LeftToRight</enum>
+         </property>
+         <property name="text">
+          <string>Allow a restore token</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QCheckBox" name="checkBoxFixRotation">
+         <property name="focusPolicy">
+          <enum>Qt::ClickFocus</enum>
+         </property>
+         <property name="toolTip">
+          <string>Enable GPU-accelerated rotation fix for rotated monitors.
+Check this if your shared screen appears sideways or distorted.</string>
+         </property>
+         <property name="layoutDirection">
+          <enum>Qt::LeftToRight</enum>
+         </property>
+         <property name="text">
+          <string>Fix rotated monitor</string>
+         </property>
+        </widget>
+       </item>
      </layout>
     </item>
    </layout>

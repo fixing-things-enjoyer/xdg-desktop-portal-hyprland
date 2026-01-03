@@ -103,6 +103,14 @@ class CScreencopyPortal {
                 uint32_t x = 0, y = 0, w = 0, h = 0;
             } damage[4];
             uint32_t damageCount = 0;
+
+            bool     gpuRotationEnabled = false;
+            bool     gpuRotationApplied = false;
+            struct {
+                uint32_t w = 0, h = 0;
+            } originalDimensions;
+
+            std::unique_ptr<SBuffer> intermediateBuffer = nullptr;
         } sharingData;
 
         void onCloseRequest(sdbus::MethodCall&);
