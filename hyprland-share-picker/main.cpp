@@ -8,6 +8,9 @@
 #include <QtDebug>
 #include <QtWidgets>
 #include <QSettings>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <array>
 #include <cstdio>
 #include <iostream>
@@ -43,8 +46,25 @@ struct SWindowEntry {
 std::vector<SWindowEntry> getWindows(const char* env) {
     std::vector<SWindowEntry> result;
 
-    if (!env)
+    if (!env) {
+        // try to get from hyprctl
+        const auto    JSON = execAndGet("hyprctl clients -j");
+        QJsonDocument doc  = QJsonDocument::fromJson(QByteArray::fromStdString(JSON));
+        if (doc.isArray()) {
+            const auto ARR = doc.array();
+            for (const auto& el : ARR) {
+                const auto OBJ   = el.toObject();
+                const auto CLAZZ = OBJ["class"].toString().toStdString();
+                const auto TITLE = OBJ["title"].toString().toStdString();
+                // we can't really get the ID, so we will use the memory address
+                // it's not correct but it's something.
+                const auto ID = std::stoull(OBJ["address"].toString().toStdString(), nullptr, 16);
+
+                result.push_back({TITLE, CLAZZ, ID});
+            }
+        }
         return result;
+    }
 
     std::string rolling = env;
 
