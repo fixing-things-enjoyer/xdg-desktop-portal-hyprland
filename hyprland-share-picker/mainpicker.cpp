@@ -6,8 +6,14 @@
 MainPicker::MainPicker(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainPicker) {
     ui->setupUi(this);
 
+    QCheckBox* cursorParam = new QCheckBox("Include Cursor", this);
+    cursorParam->setObjectName("cursorCheck");
+    cursorParam->setChecked(true);
+    ui->verticalLayout->addWidget(cursorParam);
+
     QCheckBox* rotationParam = new QCheckBox("Enable Rotation Fix", this);
     rotationParam->setObjectName("rotationCheck");
+    rotationParam->setChecked(true);
     ui->verticalLayout->addWidget(rotationParam);
 }
 

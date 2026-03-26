@@ -1,0 +1,82 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    uint inputPixels[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    uint outputPixels[];
+};
+
+layout(push_constant) uniform Constants {
+    int transform;
+    int srcWidth;
+    int srcHeight;
+    int srcStridePixels;
+    int dstStridePixels;
+    int srcRegionX;
+    int srcRegionY;
+    int copyWidth;
+    int copyHeight;
+    int logicalRegionX;
+    int logicalRegionY;
+    int dstWidth;
+    int dstHeight;
+} push;
+
+void main() {
+    ivec2 srcCoords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 srcSize = ivec2(push.srcWidth, push.srcHeight);
+
+    if (srcCoords.x >= push.copyWidth || srcCoords.y >= push.copyHeight)
+        return;
+
+    srcCoords += ivec2(push.srcRegionX, push.srcRegionY);
+
+    ivec2 destCoords;
+
+    // PipeWire clients expect NORMAL orientation. Apply inverse transform first.
+    int t = push.transform;
+    if (t == 1) t = 3;            // 90 -> 270
+    else if (t == 3) t = 1;       // 270 -> 90
+    else if (t == 5) t = 7;       // FLIPPED_90 -> FLIPPED_270
+    else if (t == 7) t = 5;       // FLIPPED_270 -> FLIPPED_90
+
+    switch (t) {
+        case 0:
+            destCoords = srcCoords;
+            break;
+        case 1:
+            destCoords = ivec2(srcCoords.y, srcSize.x - 1 - srcCoords.x);
+            break;
+        case 2:
+            destCoords = ivec2(srcSize.x - 1 - srcCoords.x, srcSize.y - 1 - srcCoords.y);
+            break;
+        case 3:
+            destCoords = ivec2(srcSize.y - 1 - srcCoords.y, srcCoords.x);
+            break;
+        case 4:
+            destCoords = ivec2(srcSize.x - 1 - srcCoords.x, srcCoords.y);
+            break;
+        case 5:
+            destCoords = ivec2(srcCoords.y, srcCoords.x);
+            break;
+        case 6:
+            destCoords = ivec2(srcCoords.x, srcSize.y - 1 - srcCoords.y);
+            break;
+        case 7:
+            destCoords = ivec2(srcSize.y - 1 - srcCoords.y, srcSize.x - 1 - srcCoords.x);
+            break;
+        default:
+            destCoords = srcCoords;
+            break;
+    }
+
+    destCoords -= ivec2(push.logicalRegionX, push.logicalRegionY);
+    if (destCoords.x < 0 || destCoords.y < 0 || destCoords.x >= push.dstWidth || destCoords.y >= push.dstHeight)
+        return;
+
+    uint pixel = inputPixels[srcCoords.y * push.srcStridePixels + srcCoords.x];
+    outputPixels[destCoords.y * push.dstStridePixels + destCoords.x] = pixel;
+}

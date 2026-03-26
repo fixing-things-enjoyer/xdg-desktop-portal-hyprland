@@ -43,6 +43,37 @@ struct SWindowEntry {
     unsigned long long id = 0;
 };
 
+struct SMonitorEntry {
+    std::string name;
+    int         x      = 0;
+    int         y      = 0;
+    int         width  = 0;
+    int         height = 0;
+};
+
+std::vector<SMonitorEntry> getMonitors() {
+    std::vector<SMonitorEntry> result;
+
+    const auto    JSON = execAndGet("hyprctl monitors -j");
+    QJsonDocument doc  = QJsonDocument::fromJson(QByteArray::fromStdString(JSON));
+
+    if (!doc.isArray())
+        return result;
+
+    for (const auto& el : doc.array()) {
+        const auto obj = el.toObject();
+        result.push_back({
+            obj["name"].toString().toStdString(),
+            obj["x"].toInt(),
+            obj["y"].toInt(),
+            obj["width"].toInt(),
+            obj["height"].toInt(),
+        });
+    }
+
+    return result;
+}
+
 std::vector<SWindowEntry> getWindows(const char* env) {
     std::vector<SWindowEntry> result;
 
@@ -108,6 +139,7 @@ int main(int argc, char* argv[]) {
 
     const char*  WINDOWLISTSTR = getenv("XDPH_WINDOW_SHARING_LIST");
     const auto   WINDOWLIST    = getWindows(WINDOWLISTSTR);
+    const auto   MONITORS      = getMonitors();
 
     QApplication picker(argc, argv);
     pickerPtr = &picker;
@@ -122,10 +154,22 @@ int main(int argc, char* argv[]) {
     // get the tabwidget
     const auto TABWIDGET        = w.findChild<QTabWidget*>("tabWidget");
     const auto ALLOWTOKENBUTTON = w.findChild<QCheckBox*>("checkBox");
+    const auto CURSORCHECK      = w.findChild<QCheckBox*>("cursorCheck");
     const auto ROTATIONCHECK    = w.findChild<QCheckBox*>("rotationCheck");
 
     if (allowTokenByDefault)
         ALLOWTOKENBUTTON->setCheckState(Qt::CheckState::Checked);
+
+    CURSORCHECK->setChecked(settings->value("includeCursor", true).toBool());
+    ROTATIONCHECK->setChecked(settings->value("rotationFix", true).toBool());
+
+    const auto savePickerSettings = [=]() {
+        settings->setValue("width", mainPickerPtr->width());
+        settings->setValue("height", mainPickerPtr->height());
+        settings->setValue("includeCursor", CURSORCHECK->isChecked());
+        settings->setValue("rotationFix", ROTATIONCHECK->isChecked());
+        settings->sync();
+    };
 
     const auto TAB1 = (QWidget*)TABWIDGET->children()[0];
 
@@ -153,14 +197,13 @@ int main(int argc, char* argv[]) {
         QObject::connect(button, &QPushButton::clicked, [=]() {
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (CURSORCHECK->isChecked() ? "c" : "");
             std::cout << (ROTATIONCHECK->isChecked() ? "o" : "");
             std::cout << "/";
 
             std::cout << "screen:" << outputName.toStdString() << "\n";
 
-            settings->setValue("width", mainPickerPtr->width());
-            settings->setValue("height", mainPickerPtr->height());
-            settings->sync();
+            savePickerSettings();
 
             pickerPtr->quit();
             return 0;
@@ -190,14 +233,13 @@ int main(int argc, char* argv[]) {
         QObject::connect(button, &QPushButton::clicked, [=]() {
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (CURSORCHECK->isChecked() ? "c" : "");
             std::cout << (ROTATIONCHECK->isChecked() ? "o" : "");
             std::cout << "/";
 
             std::cout << "window:" << mainPickerPtr->windowIDs[button] << "\n";
 
-            settings->setValue("width", mainPickerPtr->width());
-            settings->setValue("height", mainPickerPtr->height());
-            settings->sync();
+            savePickerSettings();
 
             pickerPtr->quit();
             return 0;
@@ -224,7 +266,7 @@ int main(int argc, char* argv[]) {
         REGION      = REGION.substr(0, REGION.length());
 
         // now, get the screen
-        QScreen* pScreen = nullptr;
+        const SMonitorEntry* pMonitor = nullptr;
         if (REGION.find_first_of(' ') == std::string::npos) {
             std::cout << "error1\n";
             pickerPtr->quit();
@@ -232,14 +274,14 @@ int main(int argc, char* argv[]) {
         }
         const auto SCREEN_NAME = REGION.substr(0, REGION.find_first_of(' '));
 
-        for (auto& screen : SCREENS) {
-            if (screen->name().toStdString() == SCREEN_NAME) {
-                pScreen = screen;
+        for (const auto& monitor : MONITORS) {
+            if (monitor.name == SCREEN_NAME) {
+                pMonitor = &monitor;
                 break;
             }
         }
 
-        if (!pScreen) {
+        if (!pMonitor) {
             std::cout << "error2\n";
             pickerPtr->quit();
             return 1;
@@ -258,14 +300,13 @@ int main(int argc, char* argv[]) {
 
             std::cout << "[SELECTION]";
             std::cout << (ALLOWTOKENBUTTON->isChecked() ? "r" : "");
+            std::cout << (CURSORCHECK->isChecked() ? "c" : "");
             std::cout << (ROTATIONCHECK->isChecked() ? "o" : "");
             std::cout << "/";
 
-            std::cout << "region:" << SCREEN_NAME << "@" << X - pScreen->geometry().x() << "," << Y - pScreen->geometry().y() << "," << W << "," << H << "\n";
+            std::cout << "region:" << SCREEN_NAME << "@" << X - pMonitor->x << "," << Y - pMonitor->y << "," << W << "," << H << "\n";
 
-            settings->setValue("width", mainPickerPtr->width());
-            settings->setValue("height", mainPickerPtr->height());
-            settings->sync();
+            savePickerSettings();
 
             pickerPtr->quit();
             return 0;

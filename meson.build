@@ -32,6 +32,33 @@ add_project_arguments(cpp_compiler.get_supported_arguments([
   '-Wno-address-of-temporary'
 ]), language: 'cpp')
 
+if get_option('buildtype') == 'debug'
+  add_project_arguments('-DXDPH_DEBUG', language: 'cpp')
+endif
+
+add_project_arguments('-DXDPH_VERSION="' + meson.project_version() + '"', language: 'cpp')
+
+vulkan_dep = dependency('vulkan', required: true)
+
+glslang = find_program('glslangValidator', required: true)
+xxd = find_program('xxd', required: true)
+
+rotate_shader_spv = custom_target('rotate_shader_spv',
+  input: 'src/vulkan/shaders/rotate.comp',
+  output: 'rotate.comp.spv',
+  command: [glslang, '-V', '@INPUT@', '-o', '@OUTPUT@']
+)
+
+rotate_shader_header = custom_target('rotate_shader_header',
+  input: rotate_shader_spv,
+  output: 'rotate_shader.h',
+  command: [
+    'sh', '-c',
+    'xxd -i "$1" | sed -e "s/unsigned char [a-zA-Z0-9_]*/static const unsigned char rotate_shader_spv/" -e "s/unsigned int [a-zA-Z0-9_]*/static const unsigned int rotate_shader_spv_len/" > "$2"',
+    '--', '@INPUT@', '@OUTPUT@'
+  ]
+)
+
 conf_data = configuration_data()
 conf_data.set('LIBEXECDIR', join_paths(get_option('prefix'), get_option('libexecdir')))
 

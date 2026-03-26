@@ -36,6 +36,7 @@ struct SSelectionData {
     SP<CCZwlrForeignToplevelHandleV1> windowHandle = nullptr;
     uint32_t                          x = 0, y = 0, w = 0, h = 0; // for TYPE_GEOMETRY
     bool                              allowToken  = false;
+    bool                              withCursor  = true;
     bool                              rotationFix = false;
 
     // for restoring
@@ -44,9 +45,10 @@ struct SSelectionData {
 
 struct wl_buffer;
 
-SSelectionData   promptForScreencopySelection();
+SSelectionData   promptForScreencopySelection(bool preferToken = false);
 uint32_t         drmFourccFromSHM(wl_shm_format format);
 spa_video_format pwFromDrmFourcc(uint32_t format);
+uint32_t         drmFourccFromPW(spa_video_format format);
 wl_shm_format    wlSHMFromDrmFourcc(uint32_t format);
 spa_video_format pwStripAlpha(spa_video_format format);
 std::string      getRandName(std::string prefix);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ext-image-capture-source-v1.hpp"
+#include "ext-image-copy-capture-v1.hpp"
 #include "wlr-screencopy-unstable-v1.hpp"
 #include "hyprland-toplevel-export-v1.hpp"
 #include <hyprutils/memory/UniquePtr.hpp>
@@ -7,9 +9,16 @@
 #include <sdbus-c++/sdbus-c++.h>
 #include "../shared/ScreencopyShared.hpp"
 #include <gbm.h>
+#include <libdrm/drm_fourcc.h>
 #include "../shared/Session.hpp"
 #include "../dbusDefines.hpp"
 #include <chrono>
+#include <array>
+#include <vector>
+
+namespace xdph::vulkan {
+    class VulkanRotator;
+}
 
 enum cursorModes {
     HIDDEN   = 1,
@@ -37,14 +46,20 @@ struct pw_stream;
 struct pw_buffer;
 
 struct SBuffer {
+    ~SBuffer();
+
     bool           isDMABUF = false;
     uint32_t       w = 0, h = 0, fmt = 0;
     int            planeCount = 0;
 
-    int            fd[4];
-    uint32_t       size[4], stride[4], offset[4];
+    int            fd[4] = {-1, -1, -1, -1};
+    uint32_t       size[4] = {0, 0, 0, 0}, stride[4] = {0, 0, 0, 0}, offset[4] = {0, 0, 0, 0};
+    uint64_t       modifier = DRM_FORMAT_MOD_INVALID;
 
     gbm_bo*        bo = nullptr;
+    void*          mapped = nullptr;
+    size_t         mappedSize = 0;
+    bool           awaitingRelease = false;
 
     SP<CCWlBuffer> wlBuffer = nullptr;
     pw_buffer*     pwBuffer = nullptr;
@@ -54,7 +69,10 @@ class CPipewireConnection;
 
 class CScreencopyPortal {
   public:
+    static constexpr size_t ROTATION_CAPTURE_POOL_SIZE = 12;
+
     CScreencopyPortal(SP<CCZwlrScreencopyManagerV1>);
+    ~CScreencopyPortal();
 
     void   appendToplevelExport(SP<CCHyprlandToplevelExportManagerV1>);
 
@@ -82,14 +100,18 @@ class CScreencopyPortal {
             SP<CCZwlrScreencopyFrameV1>           frameCallback       = nullptr;
             SP<CCHyprlandToplevelExportFrameV1>   windowFrameCallback = nullptr;
             frameStatus                           status              = FRAME_NONE;
+            bool                                  rotationReady       = false;
+            bool                                  rotationRequested   = true;
             uint64_t                              tvSec               = 0;
             uint32_t                              tvNsec              = 0;
             uint64_t                              tvTimestampNs       = 0;
             uint32_t                              nodeID              = 0;
             uint32_t                              framerate           = 60;
             wl_output_transform                   transform           = WL_OUTPUT_TRANSFORM_NORMAL;
+            wl_output_transform                   lastTransform       = WL_OUTPUT_TRANSFORM_NORMAL;
             std::chrono::system_clock::time_point begunFrame          = std::chrono::system_clock::now();
             uint32_t                              copyRetries         = 0;
+            uint32_t                              idleFrameStreak     = 0;
 
             struct {
                 uint32_t w = 0, h = 0, size = 0, stride = 0, fmt = 0;
@@ -102,18 +124,37 @@ class CScreencopyPortal {
             struct {
                 uint32_t x = 0, y = 0, w = 0, h = 0;
             } damage[4];
-            uint32_t damageCount = 0;
+            uint32_t                              damageCount = 0;
+            std::array<std::unique_ptr<SBuffer>, ROTATION_CAPTURE_POOL_SIZE> rotationCaptureBuffers = {};
+            size_t                                rotationCaptureBufferIndex = 0;
+            size_t                                rotationCaptureBufferActiveIndex = 0;
+            SP<CCExtImageCaptureSourceV1>        extImageSource = nullptr;
+            SP<CCExtImageCopyCaptureSessionV1>   extImageCopySession = nullptr;
+            SP<CCExtImageCopyCaptureFrameV1>     extImageCopyFrame = nullptr;
+            bool                                 extImageCopyConstraintsReady = false;
+            uint32_t                             extImageCopyBufferW = 0;
+            uint32_t                             extImageCopyBufferH = 0;
+            uint32_t                             extImageCopyDMAFormat = DRM_FORMAT_INVALID;
+            uint64_t                             extImageCopyDMAModifier = DRM_FORMAT_MOD_INVALID;
+            std::vector<uint32_t>               extImageCopySHMFormats;
+            std::vector<std::pair<uint32_t, uint64_t>> extImageCopyDMAFormats;
         } sharingData;
 
         void onCloseRequest(sdbus::MethodCall&);
         void onCloseSession(sdbus::MethodCall&);
     };
 
-    void                                 startFrameCopy(SSession* pSession);
-    void                                 queueNextShareFrame(SSession* pSession);
-    bool                                 hasToplevelCapabilities();
+    void                                         startFrameCopy(SSession* pSession);
+    void                                         queueNextShareFrame(SSession* pSession);
+    bool                                         hasToplevelCapabilities();
+    bool                                         shouldUseExtImageCopy(SSession* pSession);
+    bool                                         shouldApplyGpuRotation(SSession* pSession);
+    std::pair<uint32_t, uint32_t>                getStreamDimensions(SSession* pSession, uint32_t physicalW, uint32_t physicalH);
 
-    std::unique_ptr<CPipewireConnection> m_pPipewire;
+    std::unique_ptr<CPipewireConnection>         m_pPipewire;
+    std::unique_ptr<xdph::vulkan::VulkanRotator> m_pRotator;
+
+    xdph::vulkan::VulkanRotator*                 getRotator();
 
   private:
     std::unique_ptr<sdbus::IObject>                          m_pObject;
@@ -122,6 +163,16 @@ class CScreencopyPortal {
 
     SSession*                                                getSession(sdbus::ObjectPath& path);
     void                                                     startSharing(SSession* pSession);
+    bool                                                     ensureExtImageCopySession(SSession* pSession);
+    void                                                     destroyExtImageCopySession(SSession* pSession);
+
+    struct {
+        bool                                  valid      = false;
+        std::string                           appid;
+        uint32_t                              cursorMode = HIDDEN;
+        SSelectionData                        selection;
+        std::chrono::system_clock::time_point issuedAt   = std::chrono::system_clock::time_point{};
+    } m_sRecentSelection;
 
     struct {
         SP<CCZwlrScreencopyManagerV1>         screencopy = nullptr;
@@ -160,7 +211,8 @@ class CPipewireConnection {
         std::vector<std::unique_ptr<SBuffer>> buffers;
     };
 
-    std::unique_ptr<SBuffer> createBuffer(SPWStream* pStream, bool dmabuf);
+    std::unique_ptr<SBuffer> createBuffer(SPWStream* pStream, bool dmabuf, bool useStreamDimensions = true);
+    SBuffer*                 ensureSessionCaptureBuffer(SPWStream* pStream);
     SPWStream*               streamFromSession(CScreencopyPortal::SSession* pSession);
     void                     removeSessionFrameCallbacks(CScreencopyPortal::SSession* pSession);
     uint32_t                 buildFormatsFor(spa_pod_builder* b[2], const spa_pod* params[2], SPWStream* stream);

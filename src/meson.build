@@ -2,7 +2,7 @@ globber = run_command('find', '.', '-name', '*.cpp', check: true)
 src = globber.stdout().strip().split('\n')
 
 executable('xdg-desktop-portal-hyprland',
-  [src],
+  [src, rotate_shader_header],
   dependencies: [
     client_protos,
     dependency('gbm'),
@@ -13,6 +13,7 @@ executable('xdg-desktop-portal-hyprland',
     dependency('sdbus-c++'),
     dependency('threads'),
     dependency('wayland-client'),
+    vulkan_dep,
   ],
   include_directories: inc,
   install: true,

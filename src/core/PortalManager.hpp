@@ -16,6 +16,8 @@
 
 #include "hyprland-toplevel-export-v1.hpp"
 #include "hyprland-global-shortcuts-v1.hpp"
+#include "ext-image-capture-source-v1.hpp"
+#include "ext-image-copy-capture-v1.hpp"
 #include "linux-dmabuf-v1.hpp"
 #include "wlr-foreign-toplevel-management-unstable-v1.hpp"
 #include "wlr-screencopy-unstable-v1.hpp"
@@ -32,6 +34,8 @@ struct SOutput {
     std::string         name;
     SP<CCWlOutput>      output      = nullptr;
     uint32_t            id          = 0;
+    int32_t             width       = 0;
+    int32_t             height      = 0;
     float               refreshRate = 60.0;
     wl_output_transform transform   = WL_OUTPUT_TRANSFORM_NORMAL;
 };
@@ -72,6 +76,9 @@ class CPortalManager {
         wl_display*                           display = nullptr;
         SP<CCWlRegistry>                      registry;
         SP<CCHyprlandToplevelExportManagerV1> hyprlandToplevelMgr;
+        SP<CCExtOutputImageCaptureSourceManagerV1> extOutputImageSourceMgr;
+        SP<CCExtForeignToplevelImageCaptureSourceManagerV1> extForeignToplevelImageSourceMgr;
+        SP<CCExtImageCopyCaptureManagerV1> extImageCopyCaptureMgr;
         SP<CCZwpLinuxDmabufV1>                linuxDmabuf;
         SP<CCZwpLinuxDmabufFeedbackV1>        linuxDmabufFeedback;
         SP<CCWlShm>                           shm;

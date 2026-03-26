@@ -39,7 +39,7 @@ std::string buildWindowList() {
     return result;
 }
 
-SSelectionData promptForScreencopySelection() {
+SSelectionData promptForScreencopySelection(bool preferToken) {
     SSelectionData      data;
 
     const char*         WAYLAND_DISPLAY             = getenv("WAYLAND_DISPLAY");
@@ -49,12 +49,16 @@ SSelectionData promptForScreencopySelection() {
     static auto* const* PALLOWTOKENBYDEFAULT =
         (Hyprlang::INT* const*)g_pPortalManager->m_sConfig.config->getConfigValuePtr("screencopy:allow_token_by_default")->getDataStaticPtr();
     static auto* const*      PCUSTOMPICKER = (Hyprlang::STRING* const)g_pPortalManager->m_sConfig.config->getConfigValuePtr("screencopy:custom_picker_binary")->getDataStaticPtr();
+    const char*              ENV_PICKER    = getenv("XDPH_CUSTOM_PICKER_BINARY");
 
     std::vector<std::string> args;
-    if (**PALLOWTOKENBYDEFAULT)
+    if (**PALLOWTOKENBYDEFAULT || preferToken)
         args.emplace_back("--allow-token");
 
-    CProcess proc(std::string{*PCUSTOMPICKER}.empty() ? "hyprland-share-picker" : *PCUSTOMPICKER, args);
+    const std::string pickerBinary =
+        ENV_PICKER && *ENV_PICKER ? std::string{ENV_PICKER} : (std::string{*PCUSTOMPICKER}.empty() ? "hyprland-share-picker" : std::string{*PCUSTOMPICKER});
+
+    CProcess proc(pickerBinary, args);
     proc.addEnv("WAYLAND_DISPLAY", WAYLAND_DISPLAY ? WAYLAND_DISPLAY : "");
     proc.addEnv("QT_QPA_PLATFORM", "wayland");
     proc.addEnv("XCURSOR_SIZE", XCURSOR_SIZE ? XCURSOR_SIZE : "24");
@@ -89,6 +93,8 @@ SSelectionData promptForScreencopySelection() {
     for (auto& flag : FLAGS) {
         if (flag == 'r')
             data.allowToken = true;
+        else if (flag == 'c')
+            data.withCursor = true;
         else if (flag == 'o')
             data.rotationFix = true;
         else
@@ -197,6 +203,31 @@ spa_video_format pwFromDrmFourcc(uint32_t format) {
         case DRM_FORMAT_BGRA1010102: return SPA_VIDEO_FORMAT_BGRA_102LE;
         case DRM_FORMAT_BGR888: return SPA_VIDEO_FORMAT_BGR;
         default: Debug::log(ERR, "[screencopy] Unknown format {}", (int)format); abort();
+    }
+}
+
+uint32_t drmFourccFromPW(spa_video_format format) {
+    switch (format) {
+        case SPA_VIDEO_FORMAT_BGRA: return DRM_FORMAT_ARGB8888;
+        case SPA_VIDEO_FORMAT_BGRx: return DRM_FORMAT_XRGB8888;
+        case SPA_VIDEO_FORMAT_ABGR: return DRM_FORMAT_RGBA8888;
+        case SPA_VIDEO_FORMAT_xBGR: return DRM_FORMAT_RGBX8888;
+        case SPA_VIDEO_FORMAT_RGBA: return DRM_FORMAT_ABGR8888;
+        case SPA_VIDEO_FORMAT_RGBx: return DRM_FORMAT_XBGR8888;
+        case SPA_VIDEO_FORMAT_ARGB: return DRM_FORMAT_BGRA8888;
+        case SPA_VIDEO_FORMAT_xRGB: return DRM_FORMAT_BGRX8888;
+        case SPA_VIDEO_FORMAT_NV12: return DRM_FORMAT_NV12;
+        case SPA_VIDEO_FORMAT_xRGB_210LE: return DRM_FORMAT_XRGB2101010;
+        case SPA_VIDEO_FORMAT_xBGR_210LE: return DRM_FORMAT_XBGR2101010;
+        case SPA_VIDEO_FORMAT_RGBx_102LE: return DRM_FORMAT_RGBX1010102;
+        case SPA_VIDEO_FORMAT_BGRx_102LE: return DRM_FORMAT_BGRX1010102;
+        case SPA_VIDEO_FORMAT_ARGB_210LE: return DRM_FORMAT_ARGB2101010;
+        case SPA_VIDEO_FORMAT_ABGR_210LE: return DRM_FORMAT_ABGR2101010;
+        case SPA_VIDEO_FORMAT_RGBA_102LE: return DRM_FORMAT_RGBA1010102;
+        case SPA_VIDEO_FORMAT_BGRA_102LE: return DRM_FORMAT_BGRA1010102;
+        case SPA_VIDEO_FORMAT_RGB: return DRM_FORMAT_BGR888;
+        case SPA_VIDEO_FORMAT_BGR: return DRM_FORMAT_RGB888;
+        default: Debug::log(ERR, "[screencopy] Unknown PipeWire format {}", (int)format); abort();
     }
 }
 

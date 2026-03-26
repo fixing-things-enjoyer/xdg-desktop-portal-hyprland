@@ -18,6 +18,9 @@ executable('hyprland-share-picker',
   sources,
   ui_files,
   moc,
-  dependencies: qtdep,
+  dependencies: [
+    qtdep,
+    dependency('hyprutils'),
+  ],
   install: true
 )

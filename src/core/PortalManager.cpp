@@ -19,8 +19,13 @@ SOutput::SOutput(SP<CCWlOutput> output_) : output(output_) {
 
         Debug::log(LOG, "Found output name {}", name);
     });
-    output->setMode([this](CCWlOutput* r, uint32_t flags, int32_t width, int32_t height, int32_t refresh) { //
+    output->setMode([this](CCWlOutput* r, uint32_t flags, int32_t width_, int32_t height_, int32_t refresh) { //
         refreshRate = refresh;
+
+        if ((flags & WL_OUTPUT_MODE_CURRENT) != 0 || width == 0 || height == 0) {
+            width  = width_;
+            height = height_;
+        }
     });
     output->setGeometry([this](CCWlOutput* r, int32_t x, int32_t y, int32_t physical_width, int32_t physical_height, int32_t subpixel, const char* make, const char* model,
                                int32_t transform_) { //
@@ -44,6 +49,7 @@ CPortalManager::CPortalManager() {
     m_sConfig.config->addConfigValue("screencopy:max_fps", Hyprlang::INT{120L});
     m_sConfig.config->addConfigValue("screencopy:allow_token_by_default", Hyprlang::INT{0L});
     m_sConfig.config->addConfigValue("screencopy:custom_picker_binary", Hyprlang::STRING{""});
+    m_sConfig.config->addConfigValue("screencopy:enable_gpu_rotation", Hyprlang::INT{1L});
 
     m_sConfig.config->commence();
     m_sConfig.config->parse();
@@ -67,6 +73,21 @@ void CPortalManager::onGlobal(uint32_t name, const char* interface, uint32_t ver
     else if (INTERFACE == hyprland_toplevel_export_manager_v1_interface.name) {
         m_sWaylandConnection.hyprlandToplevelMgr = makeShared<CCHyprlandToplevelExportManagerV1>(
             (wl_proxy*)wl_registry_bind((wl_registry*)m_sWaylandConnection.registry->resource(), name, &hyprland_toplevel_export_manager_v1_interface, version));
+    }
+
+    else if (INTERFACE == ext_output_image_capture_source_manager_v1_interface.name) {
+        m_sWaylandConnection.extOutputImageSourceMgr = makeShared<CCExtOutputImageCaptureSourceManagerV1>(
+            (wl_proxy*)wl_registry_bind((wl_registry*)m_sWaylandConnection.registry->resource(), name, &ext_output_image_capture_source_manager_v1_interface, 1));
+    }
+
+    else if (INTERFACE == ext_foreign_toplevel_image_capture_source_manager_v1_interface.name) {
+        m_sWaylandConnection.extForeignToplevelImageSourceMgr = makeShared<CCExtForeignToplevelImageCaptureSourceManagerV1>(
+            (wl_proxy*)wl_registry_bind((wl_registry*)m_sWaylandConnection.registry->resource(), name, &ext_foreign_toplevel_image_capture_source_manager_v1_interface, 1));
+    }
+
+    else if (INTERFACE == ext_image_copy_capture_manager_v1_interface.name) {
+        m_sWaylandConnection.extImageCopyCaptureMgr = makeShared<CCExtImageCopyCaptureManagerV1>(
+            (wl_proxy*)wl_registry_bind((wl_registry*)m_sWaylandConnection.registry->resource(), name, &ext_image_copy_capture_manager_v1_interface, 1));
     }
 
     else if (INTERFACE == wl_output_interface.name) {
